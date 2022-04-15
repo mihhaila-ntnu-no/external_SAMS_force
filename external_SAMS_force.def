@@ -1,0 +1,2 @@
+LIBRARY		external_SAMS_force
+EXPORTS		gfexfo_	@3
