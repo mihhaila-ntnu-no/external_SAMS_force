@@ -25,7 +25,6 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	int iteration_nr = iinfo[11];
 	float time = rinfo[0];
 	float dt = rinfo[1];
-
 	
 	// TODO test what happens if *ierr=-1. It's not guaranteed that the simulation will stop
 	// TODO check that on this machine, float and double have a 2x size difference
@@ -76,6 +75,9 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	static double displacement_SIMA_tm1[6]; // Timestep t = -1
 	static double displacement_SIMA_tm2[6]; // Timestep t = -2
 	static double velocity_SAMS_tm1[6]; // Timestep t = -1
+	static double mass_matrix_SIMA[6][6];
+	static double stiffness_matrix_SIMA[6][6]; // Hydrostatic restoring force is modeled as spring stiffness
+	static double stiffness_reference_SIMA[6]; // Hydrostatic equilibrium position
 
 	// For now, assign constant forces regardless of the iteration or timestep
 	if (step_nr < 10)
@@ -162,6 +164,18 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		"acceleration_SIMA_3",
 		"acceleration_SIMA_4",
 		"acceleration_SIMA_5",
+		"inertial_force_SIMA_0",
+		"inertial_force_SIMA_1",
+		"inertial_force_SIMA_2",
+		"inertial_force_SIMA_3",
+		"inertial_force_SIMA_4",
+		"inertial_force_SIMA_5",
+		"hydrostatic_force_SIMA_0",
+		"hydrostatic_force_SIMA_1",
+		"hydrostatic_force_SIMA_2",
+		"hydrostatic_force_SIMA_3",
+		"hydrostatic_force_SIMA_4",
+		"hydrostatic_force_SIMA_5",
 		"SAMS_Time",
 		"SAMS_positionX",
 		"SAMS_positionY",
@@ -206,7 +220,6 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	int nr_of_csv_doubles = (int)sizeof(csv_doubles_header) / sizeof(csv_doubles_header[0]);
 	char* result_file_name = "gfexfo_sams.csv";
 	
-
 	run_counter++;
 
 	// Missing kinematic state variables of current timestep
@@ -217,8 +230,8 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	// Mass coefficients
 	double rm, rixx, riyx, riyy, rizx, rizy, rizz;
 	double inertial_force_SIMA[6];
-	double mass_matrix_diagonal_SIMA[6];
-
+	double hydrostatic_force_SIMA[6];
+	
 	int iResult; // for error codes
 	// First run, open the SAMS connection and write the log headers
 	if (step_nr == 1 && substep_nr == 1 && iteration_nr == 0)
@@ -268,30 +281,86 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		do
 		{
 			getline(&line_buffer, &line_buffer_size, sys_dat_file);
-		} while (strcmp(line_buffer," MASS COEFFICIENTS\n"));
+		} while (strcmp(line_buffer, " MASS COEFFICIENTS\n"));
 		getline(&line_buffer, &line_buffer_size, sys_dat_file); // Skip the separator line
 		getline(&line_buffer, &line_buffer_size, sys_dat_file); // Skip the headers
 		line_size = getline(&line_buffer, &line_buffer_size, sys_dat_file);
 		if (line_size != 114)
-		{
-			printf("Warning reading mass coefficients from sys.dat: unexpected length of line");
-			*ierr = 1;
-			return;
-		}
-		iResult = sscanf(line_buffer, "%le%le%le%le%le%le%le\n", &rm, &rixx, &riyx, &riyy, &rizx, &rizy, &rizz);
+			printf("Warning reading mass coefficients from sys.dat: unexpected length of line\n");
+		iResult = sscanf
+		(
+			line_buffer,
+			"%le%le%le%le%le%le%le\n",
+			&mass_matrix_SIMA[0][0],
+			&mass_matrix_SIMA[3][3],
+			&mass_matrix_SIMA[4][3],
+			&mass_matrix_SIMA[4][4],
+			&mass_matrix_SIMA[5][3],
+			&mass_matrix_SIMA[5][4],
+			&mass_matrix_SIMA[5][5]
+		);
 		if (iResult != 7)
 		{
 			printf("Error parsing mass coefficients from sys.dat\n");
 			*ierr = 1;
 			return;
 		}
-		mass_matrix_diagonal_SIMA[0] = rm;
-		mass_matrix_diagonal_SIMA[1] = rm;
-		mass_matrix_diagonal_SIMA[2] = rm;
-		mass_matrix_diagonal_SIMA[3] = rixx;
-		mass_matrix_diagonal_SIMA[4] = riyy;
-		mass_matrix_diagonal_SIMA[5] = rizz;
-		// TODO Read the hydrostatic stiffness from the same file
+		mass_matrix_SIMA[1][1] = mass_matrix_SIMA[0][0];
+		mass_matrix_SIMA[2][2] = mass_matrix_SIMA[0][0];
+		do
+		{
+			getline(&line_buffer, &line_buffer_size, sys_dat_file);
+		} while (strcmp(line_buffer, " STIFFNESS REFERENCE\n"));
+		getline(&line_buffer, &line_buffer_size, sys_dat_file); // Skip the separator line
+		getline(&line_buffer, &line_buffer_size, sys_dat_file); // Skip the headers
+		line_size = getline(&line_buffer, &line_buffer_size, sys_dat_file);
+		printf("line_size: %d", (int)line_size);
+		if (line_size != 99)
+			printf("Warning reading stiffness reference from sys.dat: unexpected length of line\n");
+		iResult = sscanf
+		(
+			line_buffer,
+			"%le%le%le%le%le%le\n",
+			&stiffness_reference_SIMA[0],
+			&stiffness_reference_SIMA[1],
+			&stiffness_reference_SIMA[2],
+			&stiffness_reference_SIMA[3],
+			&stiffness_reference_SIMA[4],
+			&stiffness_reference_SIMA[5]
+		);
+		if (iResult != 6)
+		{
+			printf("Error parsing stiffness coefficients from sys.dat\n");
+			*ierr = 1;
+			return;
+		}
+		do
+		{
+			getline(&line_buffer, &line_buffer_size, sys_dat_file);
+		} while (strcmp(line_buffer, "'KMAT\n"));
+		for (int i = 0;i < 6;i++)
+		{
+			line_size= getline(&line_buffer, &line_buffer_size, sys_dat_file);
+			if (line_size != 86)
+				printf("Warning reading stiffness matrix from sys.dat: unexpected length of line\n");
+			iResult = sscanf
+			(
+				line_buffer,
+				"%lf%lf%lf%lf%lf%lf\n",
+				&stiffness_matrix_SIMA[i][0],
+				&stiffness_matrix_SIMA[i][1],
+				&stiffness_matrix_SIMA[i][2],
+				&stiffness_matrix_SIMA[i][3],
+				&stiffness_matrix_SIMA[i][4],
+				&stiffness_matrix_SIMA[i][5]
+			);
+			if (iResult != 6)
+			{
+				printf("Error parsing stiffness coefficients from sys.dat\n");
+				*ierr = 1;
+				return;
+			}
+		}
 		free(line_buffer);
 		fclose(sys_dat_file);
 	}
@@ -299,6 +368,12 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	// Calculate what we can in 6DoF without having received anything from SAMS
 	for (int i = 0;i < 6;i++)
 	{
+		// Back-initialize the SIMA displacements to avoid initial jerk
+		if (run_counter == 1)
+		{
+			displacement_SIMA_tm1[i] = displacement_SIMA_t0.double_precision[i];
+			displacement_SIMA_tm2[i] = displacement_SIMA_t0.double_precision[i];
+		}
 		// Calculate velocities and accelerations as backward finite differences of displacement.
 		// In the simulation beginning, unknown values are assumed 0
 		velocity_SIMA_t0[i] =
@@ -313,7 +388,8 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 				+ displacement_SIMA_t0.double_precision[i]
 				) / pow(dt, 2);
 		// Calculate inertial forces
-		inertial_force_SIMA[i] = acceleration_SIMA[i] * mass_matrix_diagonal_SIMA[i];
+		inertial_force_SIMA[i] = acceleration_SIMA[i] * mass_matrix_SIMA[i][i];
+		hydrostatic_force_SIMA[i] = (stiffness_reference_SIMA[i] - displacement_SIMA_t0.double_precision[i]) * stiffness_matrix_SIMA[i][i];
 	}
 	// TODO Test resilience for extra timesteps and iterations. Right now, both are disabled through SIMA settings
 	if (iteration_nr == 0)
@@ -442,6 +518,18 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			acceleration_SIMA[3],
 			acceleration_SIMA[4],
 			acceleration_SIMA[5],
+			inertial_force_SIMA[0],
+			inertial_force_SIMA[1],
+			inertial_force_SIMA[2],
+			inertial_force_SIMA[3],
+			inertial_force_SIMA[4],
+			inertial_force_SIMA[5],
+			hydrostatic_force_SIMA[0],
+			hydrostatic_force_SIMA[1],
+			hydrostatic_force_SIMA[2],
+			hydrostatic_force_SIMA[3],
+			hydrostatic_force_SIMA[4],
+			hydrostatic_force_SIMA[5],
 			SAMS_to_GFEXFO.double_precision[0], // SAMS_Time
 			SAMS_to_GFEXFO.double_precision[1], // SAMS_positionX
 			SAMS_to_GFEXFO.double_precision[2], // SAMS_positionY
