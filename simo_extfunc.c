@@ -25,6 +25,7 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	int iteration_nr = iinfo[11];
 	float time = rinfo[0];
 	float dt = rinfo[1];
+	float g = rinfo[2];
 	
 	// TODO test what happens if *ierr=-1. It's not guaranteed that the simulation will stop
 	// TODO check that on this machine, float and double have a 2x size difference
@@ -75,7 +76,8 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	static double displacement_SIMA_tm1[6]; // Timestep t = -1
 	static double displacement_SIMA_tm2[6]; // Timestep t = -2
 	static double velocity_SAMS_tm1[6]; // Timestep t = -1
-	static double mass_matrix_SIMA[6][6];
+	static double mass_matrix_SIMA[6][6]; // [t=kg*10^3]
+	static double mass_matrix_SAMS[6][6]; // [kg]
 	static double stiffness_matrix_SIMA[6][6]; // Hydrostatic restoring force is modeled as spring stiffness
 	static double stiffness_reference_SIMA[6]; // Hydrostatic equilibrium position
 
@@ -220,6 +222,11 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	int nr_of_csv_doubles = (int)sizeof(csv_doubles_header) / sizeof(csv_doubles_header[0]);
 	char* result_file_name = "gfexfo_sams.csv";
 	
+	char itconfig_file_path[MCHEXT];
+	strncpy(itconfig_file_path, chext[0]+1, MCHEXT-1);
+	char structure_file_path[MCHEXT];
+	strncpy(structure_file_path, chext[1]+1, MCHEXT-1);
+	
 	run_counter++;
 
 	// Missing kinematic state variables of current timestep
@@ -227,10 +234,11 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	double velocity_SAMS_t0[6];
 	double acceleration_SIMA[6];
 	double acceleration_SAMS[6];
-	// Mass coefficients
-	double rm, rixx, riyx, riyy, rizx, rizy, rizz;
-	double inertial_force_SIMA[6];
-	double hydrostatic_force_SIMA[6];
+	double inertial_force_SIMA[6]; // [kN]
+	double hydrostatic_force_SIMA[6]; // [kN]
+	double radius_of_gyration_SAMS[3];
+	double mass_matrix_difference[6][6];
+
 	
 	int iResult; // for error codes
 	// First run, open the SAMS connection and write the log headers
@@ -314,7 +322,6 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		getline(&line_buffer, &line_buffer_size, sys_dat_file); // Skip the separator line
 		getline(&line_buffer, &line_buffer_size, sys_dat_file); // Skip the headers
 		line_size = getline(&line_buffer, &line_buffer_size, sys_dat_file);
-		printf("line_size: %d", (int)line_size);
 		if (line_size != 99)
 			printf("Warning reading stiffness reference from sys.dat: unexpected length of line\n");
 		iResult = sscanf
@@ -340,7 +347,7 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		} while (strcmp(line_buffer, "'KMAT\n"));
 		for (int i = 0;i < 6;i++)
 		{
-			line_size= getline(&line_buffer, &line_buffer_size, sys_dat_file);
+			line_size = getline(&line_buffer, &line_buffer_size, sys_dat_file);
 			if (line_size != 86)
 				printf("Warning reading stiffness matrix from sys.dat: unexpected length of line\n");
 			iResult = sscanf
@@ -361,8 +368,93 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 				return;
 			}
 		}
-		free(line_buffer);
 		fclose(sys_dat_file);
+
+		FILE* itconfig_file = fopen(itconfig_file_path, "r");
+		if (!itconfig_file)
+		{
+			printf("Error opening:%s\n", itconfig_file_path);
+			*ierr = 1;
+			return;
+		}
+		fclose(itconfig_file);
+
+		FILE* structure_file = fopen(structure_file_path, "r");
+		if (!structure_file)
+		{
+			printf("Error opening:%s\n", structure_file_path);
+			*ierr = 1;
+			return;
+		}
+		do
+		{
+			getline(&line_buffer, &line_buffer_size, structure_file);
+		} while (!strstr(line_buffer, "\"structureMass\""));
+		iResult = sscanf(line_buffer, " \" structureMass \" : %lf ", &mass_matrix_SAMS[0][0]);
+		if (iResult != 1)
+		{
+			// TODO show the actual file paths in these messages
+			printf("Error parsing structure mass from structure file\n");
+			*ierr = 1;
+			return;
+		}
+		mass_matrix_SAMS[1][1] = mass_matrix_SAMS[0][0];
+		mass_matrix_SAMS[2][2] = mass_matrix_SAMS[0][0];
+
+		// Do not know whether the mass or the radii come first, so search from the top
+		fclose(structure_file);
+		structure_file = fopen(structure_file_path, "r");
+		do
+		{
+			getline(&line_buffer, &line_buffer_size, structure_file);
+		} while (!strstr(line_buffer, "\"structureRadiusOfGyration\""));
+		iResult = sscanf
+		(
+			line_buffer,
+			" \" structureRadiusOfGyration \" : [ %lf , %lf , %lf",
+			&radius_of_gyration_SAMS[0],
+			&radius_of_gyration_SAMS[1],
+			&radius_of_gyration_SAMS[2]
+		);
+		if (iResult != 3)
+		{
+			// TODO show the actual file paths in these messages
+			printf("Error parsing gyration radii from structure file\n");
+			*ierr = 1;
+			return;
+		}
+		fclose(structure_file);
+		
+		free(line_buffer);
+		// Calculate the mass moments of inertia from the radii of gyration
+		for (int i = 0;i < 3;i++)
+			mass_matrix_SAMS[3 + i][3 + i] = pow(radius_of_gyration_SAMS[i], 2) * mass_matrix_SAMS[i][i];
+		for (int i = 0;i < 6;i++)
+		{
+			for (int j = 0;j < 6;j++)
+			{
+				if (mass_matrix_SAMS[i][j] && mass_matrix_SIMA[i][j] )
+				{
+					mass_matrix_difference[i][j] =
+						(mass_matrix_SIMA[i][j] * 1000 - mass_matrix_SAMS[i][j])
+						/ mass_matrix_SIMA[i][j];
+					if (mass_matrix_difference[i][j] > 0.01)
+					{
+						printf
+						(
+							"At position [%d][%d], the mass matrix has %lf in SIMA and %lf in SAMS, relative difference %le\n",
+							i,
+							j,
+							mass_matrix_SIMA[i][j] * 1000,
+							mass_matrix_SAMS[i][j],
+							mass_matrix_difference[i][j]
+						);
+						*ierr = 1;
+						return;
+					}
+				}
+			}
+		}
 	}
 	
 	// Calculate what we can in 6DoF without having received anything from SAMS
