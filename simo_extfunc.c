@@ -215,7 +215,13 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		"acceleration_SAMS_2",
 		"acceleration_SAMS_3",
 		"acceleration_SAMS_4",
-		"acceleration_SAMS_5"
+		"acceleration_SAMS_5",
+		"inertial_force_SAMS_0",
+		"inertial_force_SAMS_1",
+		"inertial_force_SAMS_2",
+		"inertial_force_SAMS_3",
+		"inertial_force_SAMS_4",
+		"inertial_force_SAMS_5"
 	};
 	int nr_of_csv_ints = (int)sizeof(csv_ints_header) / sizeof(csv_ints_header[0]);
 	int nr_of_csv_floats = (int)sizeof(csv_floats_header) / sizeof(csv_floats_header[0]);
@@ -235,6 +241,7 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	double acceleration_SIMA[6];
 	double acceleration_SAMS[6];
 	double inertial_force_SIMA[6]; // [kN]
+	double inertial_force_SAMS[6]; // [N]
 	double hydrostatic_force_SIMA[6]; // [kN]
 	double radius_of_gyration_SAMS[3];
 	double mass_matrix_difference[6][6];
@@ -244,7 +251,7 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	// First run, open the SAMS connection and write the log headers
 	if (step_nr == 1 && substep_nr == 1 && iteration_nr == 0)
 	{
-		// TODO read the .itconfig, check that SAMS simulates one timestep less than SIMA
+		
 		sams_tcp_socket = connect_to_SAMS();
 		csv_writer = CsvWriter_new(result_file_name, ";", 0);
 		for (int i = 0; i < nr_of_csv_ints; i++)
@@ -377,6 +384,7 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			*ierr = 1;
 			return;
 		}
+		// TODO check that SAMS simulates one timestep less than SIMA
 		fclose(itconfig_file);
 
 		FILE* structure_file = fopen(structure_file_path, "r");
@@ -400,7 +408,6 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		}
 		mass_matrix_SAMS[1][1] = mass_matrix_SAMS[0][0];
 		mass_matrix_SAMS[2][2] = mass_matrix_SAMS[0][0];
-
 		// Do not know whether the mass or the radii come first, so search from the top
 		fclose(structure_file);
 		structure_file = fopen(structure_file_path, "r");
@@ -429,6 +436,7 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		// Calculate the mass moments of inertia from the radii of gyration
 		for (int i = 0;i < 3;i++)
 			mass_matrix_SAMS[3 + i][3 + i] = pow(radius_of_gyration_SAMS[i], 2) * mass_matrix_SAMS[i][i];
+		// Check the mass matrix for disrepancies between SAMS and SIMA
 		for (int i = 0;i < 6;i++)
 		{
 			for (int j = 0;j < 6;j++)
@@ -456,7 +464,6 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			}
 		}
 	}
-	
 	// Calculate what we can in 6DoF without having received anything from SAMS
 	for (int i = 0;i < 6;i++)
 	{
@@ -509,16 +516,19 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			return;
 		}
 
+		// Calculations based on data received from SAMS
 		for (int i = 0;i < 6;i++)
 		{
 			// Rename some received variables for clarity
 			velocity_SAMS_t0[i] = SAMS_to_GFEXFO.double_precision[8 + i];
-			// Compute  accelerations as backward finite differences of velocity.
+			// Calculate accelerations as backward finite differences of velocity.
 			acceleration_SAMS[i] =
 				(
 					-velocity_SAMS_tm1[i]
 					+ velocity_SAMS_t0[i]
 					) / dt;
+			// Calculate inertial forces
+			inertial_force_SAMS[i] = acceleration_SAMS[i] * mass_matrix_SAMS[i][i];
 		}
 
 		// SIMO receives forces through stor[] in kN, SAMS through TCP in N
@@ -659,7 +669,13 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			acceleration_SAMS[2],
 			acceleration_SAMS[3],
 			acceleration_SAMS[4],
-			acceleration_SAMS[5]
+			acceleration_SAMS[5],
+			inertial_force_SAMS[0],
+			inertial_force_SAMS[1],
+			inertial_force_SAMS[2],
+			inertial_force_SAMS[3],
+			inertial_force_SAMS[4],
+			inertial_force_SAMS[5]
 		};
 		CsvWriter_nextRow(csv_writer);
 		char log_buffer[50];
