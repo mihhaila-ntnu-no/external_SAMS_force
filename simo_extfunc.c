@@ -33,7 +33,7 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	union
 	{
 		float single_precision[MGAMMA];
-		double double_precision[MGAMMA / 2];
+		double double_precision[MGAMMA / 2]; // 9/2=4 for integers
 	} gamma_float;
 	for (int i = 0; i < MGAMMA;i++)
 		gamma_float.single_precision[i] = gamma[body_nr][i];
@@ -221,7 +221,26 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		"inertial_force_SAMS_2",
 		"inertial_force_SAMS_3",
 		"inertial_force_SAMS_4",
-		"inertial_force_SAMS_5"
+		"inertial_force_SAMS_5",
+		"hydrostatic_force_SAMS_0",
+		"hydrostatic_force_SAMS_1",
+		"hydrostatic_force_SAMS_2",
+		"hydrostatic_force_SAMS_3",
+		"hydrostatic_force_SAMS_4",
+		"hydrostatic_force_SAMS_5",
+		"rotation_matrix_SIMA_0_0",
+		"rotation_matrix_SIMA_0_1",
+		"rotation_matrix_SIMA_0_2",
+		"rotation_matrix_SIMA_1_0",
+		"rotation_matrix_SIMA_1_1",
+		"rotation_matrix_SIMA_1_2",
+		"rotation_matrix_SIMA_2_0",
+		"rotation_matrix_SIMA_2_1",
+		"rotation_matrix_SIMA_2_2",
+		"gamma_0",
+		"gamma_1",
+		"gamma_2",
+		"gamma_3"
 	};
 	int nr_of_csv_ints = (int)sizeof(csv_ints_header) / sizeof(csv_ints_header[0]);
 	int nr_of_csv_floats = (int)sizeof(csv_floats_header) / sizeof(csv_floats_header[0]);
@@ -235,18 +254,19 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	
 	run_counter++;
 
-	// Missing kinematic state variables of current timestep
 	double velocity_SIMA_t0[6];
 	double velocity_SAMS_t0[6];
 	double acceleration_SIMA[6];
+	double displacement_SAMS[6];
 	double acceleration_SAMS[6];
 	double inertial_force_SIMA[6]; // [kN]
 	double inertial_force_SAMS[6]; // [N]
 	double hydrostatic_force_SIMA[6]; // [kN]
+	double hydrostatic_force_SAMS[6]; // [N]
 	double radius_of_gyration_SAMS[3];
 	double mass_matrix_difference[6][6];
+	double rotation_matrix_SIMA[3][3];
 
-	
 	int iResult; // for error codes
 	// First run, open the SAMS connection and write the log headers
 	if (step_nr == 1 && substep_nr == 1 && iteration_nr == 0)
@@ -486,9 +506,26 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 				- 2 * displacement_SIMA_tm1[i]
 				+ displacement_SIMA_t0.double_precision[i]
 				) / pow(dt, 2);
-		// Calculate inertial forces
+		// Calculate linear forces
 		inertial_force_SIMA[i] = acceleration_SIMA[i] * mass_matrix_SIMA[i][i];
-		hydrostatic_force_SIMA[i] = (stiffness_reference_SIMA[i] - displacement_SIMA_t0.double_precision[i]) * stiffness_matrix_SIMA[i][i];
+		hydrostatic_force_SIMA[i] =
+			(stiffness_reference_SIMA[i] - displacement_SIMA_t0.double_precision[i])
+			* stiffness_matrix_SIMA[i][i];
+		// Rename the sequential angular displacements for clarity
+		double phi = displacement_SIMA_t0.double_precision[3];
+		double theta = displacement_SIMA_t0.double_precision[4];
+		double psi = displacement_SIMA_t0.double_precision[5];
+		// Calculate the global -> body coordinate rotation matrix
+		rotation_matrix_SIMA[0][0] = cos(psi) * cos(theta);
+		rotation_matrix_SIMA[0][1] = -sin(psi) * cos(phi) + cos(psi) * sin(theta) * sin(phi);
+		rotation_matrix_SIMA[0][2] = sin(psi) * sin(phi) + cos(psi) * sin(theta) * cos(phi);
+		rotation_matrix_SIMA[1][0] = sin(psi) * cos(theta);
+		rotation_matrix_SIMA[1][1] = cos(psi) * cos(phi) + sin(psi) * sin(theta) * sin(phi);
+		rotation_matrix_SIMA[1][2] = -cos(psi) * sin(phi) + sin(psi) * sin(theta) * cos(phi);
+		rotation_matrix_SIMA[2][0] = -sin(theta);
+		rotation_matrix_SIMA[2][1] = cos(theta) * sin(phi);
+		rotation_matrix_SIMA[2][2] = cos(theta) * cos(phi);
+		// TODO compare the first values with gamma
 	}
 	// TODO Test resilience for extra timesteps and iterations. Right now, both are disabled through SIMA settings
 	if (iteration_nr == 0)
@@ -520,6 +557,7 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		for (int i = 0;i < 6;i++)
 		{
 			// Rename some received variables for clarity
+			displacement_SAMS[i] = SAMS_to_GFEXFO.double_precision[1 + i];
 			velocity_SAMS_t0[i] = SAMS_to_GFEXFO.double_precision[8 + i];
 			// Calculate accelerations as backward finite differences of velocity.
 			acceleration_SAMS[i] =
@@ -529,6 +567,8 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 					) / dt;
 			// Calculate inertial forces
 			inertial_force_SAMS[i] = acceleration_SAMS[i] * mass_matrix_SAMS[i][i];
+			// Calculate hydrostatic forces, see supervision presentation of 27.04.2022
+			hydrostatic_force_SAMS[i] = (stiffness_reference_SIMA[i] - displacement_SAMS[i]) * stiffness_matrix_SIMA[i][i];
 		}
 
 		// SIMO receives forces through stor[] in kN, SAMS through TCP in N
@@ -675,7 +715,26 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			inertial_force_SAMS[2],
 			inertial_force_SAMS[3],
 			inertial_force_SAMS[4],
-			inertial_force_SAMS[5]
+			inertial_force_SAMS[5],
+			hydrostatic_force_SAMS[0],
+			hydrostatic_force_SAMS[1],
+			hydrostatic_force_SAMS[2],
+			hydrostatic_force_SAMS[3],
+			hydrostatic_force_SAMS[4],
+			hydrostatic_force_SAMS[5],
+			rotation_matrix_SIMA[0][0],
+			rotation_matrix_SIMA[0][1],
+			rotation_matrix_SIMA[0][2],
+			rotation_matrix_SIMA[1][0],
+			rotation_matrix_SIMA[1][1],
+			rotation_matrix_SIMA[1][2],
+			rotation_matrix_SIMA[2][0],
+			rotation_matrix_SIMA[2][1],
+			rotation_matrix_SIMA[2][2],
+			gamma_float.double_precision[0],
+			gamma_float.double_precision[1],
+			gamma_float.double_precision[2],
+			gamma_float.double_precision[3]
 		};
 		CsvWriter_nextRow(csv_writer);
 		char log_buffer[50];
