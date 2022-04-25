@@ -1,3 +1,4 @@
+#define _USE_MATH_DEFINES
 #include <math.h>
 #include <stdbool.h>
 #include <direct.h>
@@ -52,7 +53,7 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	{
 		float single_precision[MSTATE];
 		double double_precision[MSTATE / 2];
-	} displacement_SIMA_t0; // timestep t=0
+	} displacement_SIMA_t0; // timestep t=0. Rotations in radians
 	for (int i = 0; i < MSTATE;i++)
 		displacement_SIMA_t0.single_precision[i] = state[body_nr][i];
 
@@ -73,7 +74,7 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	static int run_counter;
 	static WSAPROTOCOL_INFO sams_tcp_socket_info;
 	static CsvWriter* csv_writer;
-	static double displacement_SIMA_tm1[6]; // Timestep t = -1
+	static double displacement_SIMA_tm1[6]; // Timestep t = -1.
 	static double displacement_SIMA_tm2[6]; // Timestep t = -2
 	static double velocity_SAMS_tm1[6]; // Timestep t = -1
 	static double mass_matrix_SIMA[6][6]; // [t=kg*10^3]
@@ -82,15 +83,15 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	static double stiffness_reference_SIMA[6]; // Hydrostatic equilibrium position
 
 	// For now, assign constant forces regardless of the iteration or timestep
-	if (step_nr < 10)
-		stor[0] = 0.;
-	else
-		stor[0] = 10.; // [kN] surge force
+	stor[0] = 0.;
 	stor[1] = 0.;
 	stor[2] = 0.;
 	stor[3] = 0.;
 	stor[4] = 0.;
-	stor[5] = 0.;
+	if (step_nr < 10)
+		stor[5] = 0.;
+	else
+		stor[5] = 10.; // [kN*m] yaw force
 	stor[6] = 0.;
 	stor[7] = 0.;
 	stor[8] = 0.;
@@ -266,8 +267,24 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	double radius_of_gyration_SAMS[3];
 	double mass_matrix_difference[6][6];
 	double rotation_matrix_SIMA[3][3];
+	double rotation_axis_SAMS[3];
+	double rotation_angle_SAMS;
+	double rotation_velocity_negative_jump;
+	double rotation_velocity_positive_jump;
+	double rotation_acceleration_negative_jump;
+	double rotation_acceleration_positive_jump;
 
-	int iResult; // for error codes
+	// Back-initialize the SIMA displacements to avoid initial jerk
+	if (run_counter == 1)
+	{
+		for (int i = 0;i < 6;i++)
+		{
+			displacement_SIMA_tm1[i] = displacement_SIMA_t0.double_precision[i];
+			displacement_SIMA_tm2[i] = displacement_SIMA_t0.double_precision[i];
+		}
+	}
+	// For error codes
+	int iResult;
 	// First run, open the SAMS connection and write the log headers
 	if (step_nr == 1 && substep_nr == 1 && iteration_nr == 0)
 	{
@@ -484,16 +501,11 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			}
 		}
 	}
+
 	// Calculate what we can in 6DoF without having received anything from SAMS
-	for (int i = 0;i < 6;i++)
+	for (int i = 0;i < 3;i++)
 	{
-		// Back-initialize the SIMA displacements to avoid initial jerk
-		if (run_counter == 1)
-		{
-			displacement_SIMA_tm1[i] = displacement_SIMA_t0.double_precision[i];
-			displacement_SIMA_tm2[i] = displacement_SIMA_t0.double_precision[i];
-		}
-		// Calculate velocities and accelerations as backward finite differences of displacement.
+		// Calculate translational velocities and accelerations as backward finite differences of displacement.
 		// In the simulation beginning, unknown values are assumed 0
 		velocity_SIMA_t0[i] =
 			(
@@ -506,6 +518,56 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 				- 2 * displacement_SIMA_tm1[i]
 				+ displacement_SIMA_t0.double_precision[i]
 				) / pow(dt, 2);
+		// Calculate rotational velocities and accelerations, check for 0-360 = 0-2pi transition jump
+		velocity_SIMA_t0[3 + i] =
+			(
+				-displacement_SIMA_tm1[3 + i]
+				+ displacement_SIMA_t0.double_precision[3 + i]
+				) / dt;
+		rotation_velocity_negative_jump =
+			(
+				-displacement_SIMA_tm1[3 + i]
+				+ displacement_SIMA_t0.double_precision[3 + i]
+				- 2 * M_PI
+				) / dt;
+		rotation_velocity_positive_jump =
+			(
+				-displacement_SIMA_tm1[3 + i]
+				+ displacement_SIMA_t0.double_precision[3 + i]
+				+ 2 * M_PI
+				) / dt;
+		if (abs(velocity_SIMA_t0[3 + i]) > abs(rotation_velocity_negative_jump))
+			velocity_SIMA_t0[3 + i] = rotation_velocity_negative_jump;
+		if (abs(velocity_SIMA_t0[3 + i]) > abs(rotation_velocity_positive_jump))
+			velocity_SIMA_t0[3 + i] = rotation_velocity_positive_jump;
+		acceleration_SIMA[3 + i] =
+			(
+				displacement_SIMA_tm2[3 + i]
+				- 2 * displacement_SIMA_tm1[3 + i]
+				+ displacement_SIMA_t0.double_precision[3 + i]
+				) / pow(dt, 2);
+		rotation_acceleration_negative_jump =
+			(
+				displacement_SIMA_tm2[3 + i]
+				- 2 * displacement_SIMA_tm1[3 + i]
+				+ displacement_SIMA_t0.double_precision[3 + i]
+				- 2 * M_PI
+				) / pow(dt, 2);
+		rotation_acceleration_positive_jump =
+			(
+				displacement_SIMA_tm2[3 + i]
+				- 2 * displacement_SIMA_tm1[3 + i]
+				+ displacement_SIMA_t0.double_precision[3 + i]
+				+ 2 * M_PI
+				) / pow(dt, 2);
+		if (abs(acceleration_SIMA[3 + i]) > abs(rotation_acceleration_negative_jump))
+			acceleration_SIMA[3 + i] = rotation_acceleration_negative_jump;
+		if (abs(acceleration_SIMA[3 + i]) > abs(rotation_acceleration_positive_jump))
+			acceleration_SIMA[3 + i] = rotation_acceleration_positive_jump;
+
+	}
+	for (int i = 0;i < 6;i++)
+	{
 		// Calculate linear forces
 		inertial_force_SIMA[i] = acceleration_SIMA[i] * mass_matrix_SIMA[i][i];
 		hydrostatic_force_SIMA[i] =
@@ -525,7 +587,6 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		rotation_matrix_SIMA[2][0] = -sin(theta);
 		rotation_matrix_SIMA[2][1] = cos(theta) * sin(phi);
 		rotation_matrix_SIMA[2][2] = cos(theta) * cos(phi);
-		// TODO compare the first values with gamma
 	}
 	// TODO Test resilience for extra timesteps and iterations. Right now, both are disabled through SIMA settings
 	if (iteration_nr == 0)
@@ -554,6 +615,11 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		}
 
 		// Calculations based on data received from SAMS
+		for (int i = 0;i < 3;i++)
+		{
+			displacement_SAMS[i] = SAMS_to_GFEXFO.double_precision[1 + i];
+			rotation_axis_SAMS[i] = SAMS_to_GFEXFO.double_precision[4 + i];
+		}
 		for (int i = 0;i < 6;i++)
 		{
 			// Rename some received variables for clarity
