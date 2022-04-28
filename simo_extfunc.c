@@ -81,17 +81,21 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	static double mass_matrix_SAMS[6][6]; // [kg]
 	static double stiffness_matrix_SIMA[6][6]; // Hydrostatic restoring force is modeled as spring stiffness
 	static double stiffness_reference_SIMA[6]; // Hydrostatic equilibrium position
+	static char SAMS_resultfile_path[MCHEXT];
 
-	// For now, assign constant forces regardless of the iteration or timestep
-	stor[0] = 0.;
-	stor[1] = 0.;
-	stor[2] = 0.;
-	stor[3] = 0.;
-	stor[4] = 0.;
-	if (step_nr < 10)
-		stor[5] = 0.;
+	// Assign constant forces
+	if (time > 5.)
+		stor[0] = 10.; // [kN] surge
 	else
-		stor[5] = 10.; // [kN*m] yaw force
+		stor[0] = 0.;
+	stor[1] = 0.; // [kN] sway
+	stor[2] = 0.; // [kN] heave
+	stor[3] = 0.; // [MN*m] roll
+	stor[4] = 0.; // [MN*m] pitch
+	if (time >= 0.5 && time < 4.5)
+		stor[5] = 0.1; // [MN*m] yaw
+	else
+		stor[5] = 0.;
 	stor[6] = 0.;
 	stor[7] = 0.;
 	stor[8] = 0.;
@@ -187,6 +191,12 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		"SAMS_rotAxisY",
 		"SAMS_rotAxisZ",
 		"SAMS_rotAngle",
+		"displacement_SAMS_0",
+		"displacement_SAMS_1",
+		"displacement_SAMS_2",
+		"displacement_SAMS_3",
+		"displacement_SAMS_4",
+		"displacement_SAMS_5",
 		"SAMS_linVelX",
 		"SAMS_linVelY",
 		"SAMS_linVelZ",
@@ -241,17 +251,26 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		"gamma_0",
 		"gamma_1",
 		"gamma_2",
-		"gamma_3"
+		"gamma_3",
+		"rotation_matrix_SAMS_0_0",
+		"rotation_matrix_SAMS_0_1",
+		"rotation_matrix_SAMS_0_2",
+		"rotation_matrix_SAMS_1_0",
+		"rotation_matrix_SAMS_1_1",
+		"rotation_matrix_SAMS_1_2",
+		"rotation_matrix_SAMS_2_0",
+		"rotation_matrix_SAMS_2_1",
+		"rotation_matrix_SAMS_2_2",
 	};
 	int nr_of_csv_ints = (int)sizeof(csv_ints_header) / sizeof(csv_ints_header[0]);
 	int nr_of_csv_floats = (int)sizeof(csv_floats_header) / sizeof(csv_floats_header[0]);
 	int nr_of_csv_doubles = (int)sizeof(csv_doubles_header) / sizeof(csv_doubles_header[0]);
 	char* result_file_name = "gfexfo_sams.csv";
 	
-	char itconfig_file_path[MCHEXT];
-	strncpy(itconfig_file_path, chext[0]+1, MCHEXT-1);
-	char structure_file_path[MCHEXT];
-	strncpy(structure_file_path, chext[1]+1, MCHEXT-1);
+	// For error codes
+	int iResult;
+
+
 	
 	run_counter++;
 
@@ -260,13 +279,14 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	double acceleration_SIMA[6];
 	double displacement_SAMS[6];
 	double acceleration_SAMS[6];
-	double inertial_force_SIMA[6]; // [kN]
+	double inertial_force_SIMA[6]; // [kN, MN*m]
 	double inertial_force_SAMS[6]; // [N]
-	double hydrostatic_force_SIMA[6]; // [kN]
+	double hydrostatic_force_SIMA[6]; // [kN, MN*m]
 	double hydrostatic_force_SAMS[6]; // [N]
 	double radius_of_gyration_SAMS[3];
 	double mass_matrix_difference[6][6];
 	double rotation_matrix_SIMA[3][3];
+	double rotation_matrix_SAMS[3][3];
 	double rotation_axis_SAMS[3];
 	double rotation_angle_SAMS;
 	double rotation_velocity_negative_jump;
@@ -283,12 +303,114 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			displacement_SIMA_tm2[i] = displacement_SIMA_t0.double_precision[i];
 		}
 	}
-	// For error codes
-	int iResult;
+
 	// First run, open the SAMS connection and write the log headers
 	if (step_nr == 1 && substep_nr == 1 && iteration_nr == 0)
 	{
+
+		char itconfig_file_path[MCHEXT];
+		// These string parameters are defined in the "External DLL force" dialog in SIMA
+		// They are passed to this function with a leading space and without a zero termination
+		strncpy(itconfig_file_path, chext[0] + 1, MCHEXT - 1);
+		itconfig_file_path[MCHEXT - 1] = '\0';
+		char structure_file_path[MCHEXT];
+		strncpy(structure_file_path, chext[1] + 1, MCHEXT - 1);
+		structure_file_path[MCHEXT - 1] = '\0';
+		char SAMS_resultfolder_path[MCHEXT];
+		strncpy(SAMS_resultfolder_path, chext[2] + 1, MCHEXT - 1);
+		// Trim trailing space
+		char* string_end = SAMS_resultfolder_path + strlen(SAMS_resultfolder_path) - 1;
+		while (string_end > SAMS_resultfolder_path && isspace((unsigned char)*string_end)) string_end--;
+		string_end[1] = '\0'; // Write new null terminator character
+		// The basename begins after the last backslash in the path
+		char* SAMS_basename_start = strrchr(itconfig_file_path, '\\') + 1;
+		// The basename ends before the file extension
+		char* SAMS_basename_end = strstr(itconfig_file_path, ".itconfig");
+		int SAMS_basename_length = SAMS_basename_end - SAMS_basename_start;
+		int SAMS_basename_offset = SAMS_basename_start - itconfig_file_path;
+		char SAMS_basename[MCHEXT];
+		strncpy(SAMS_basename, itconfig_file_path + SAMS_basename_offset, SAMS_basename_length);
+		SAMS_basename[SAMS_basename_length] = '\0';
+		char SAMS_result_mask[MAX_PATH];
+		sprintf(SAMS_result_mask, "%s%s*.txt", SAMS_resultfolder_path, SAMS_basename);
+		// Find all .txt files at the result folder matching the basename
+		WIN32_FIND_DATA found_data;
+		HANDLE found_handle = NULL;
+		if ((found_handle = FindFirstFile(SAMS_result_mask, &found_data)) == INVALID_HANDLE_VALUE)
+		{
+			printf("Path not found: %s\n", SAMS_result_mask);
+			*ierr=1;
+			return;
+		}
+		char SAMS_basename_date_mask[MCHEXT];
+		sprintf(SAMS_basename_date_mask, "%s_ %%2d%%2d%%4d_%%6d", SAMS_basename);
+		int latest_year=0;
+		int latest_month=0;
+		int latest_day=0;
+		int latest_time=0;
+		int SAMS_result_year;
+		int SAMS_result_month;
+		int SAMS_result_day;
+		int SAMS_result_time;
+		char SAMS_latest_result[MCHEXT];
+		bool newer_result_found;
+		do
+		{
+			newer_result_found = 0;
+			iResult = sscanf
+			(
+				found_data.cFileName,
+				SAMS_basename_date_mask,
+				&SAMS_result_day,
+				&SAMS_result_month,
+				&SAMS_result_year,
+				&SAMS_result_time
+			);
+			if (iResult != 4)
+			{
+				printf("Error parsing timestamps from SAMS result files\n");
+				*ierr = 1;
+				return;
+			}
+			if (SAMS_result_year > latest_year)
+				newer_result_found = 1;
+			else if (SAMS_result_year == latest_year)
+			{
+				if (SAMS_result_month > latest_month)
+					newer_result_found = 1;
+				else if (SAMS_result_month == latest_month)
+				{
+					if (SAMS_result_day > latest_day)
+						newer_result_found = 1;
+					else if (SAMS_result_day == latest_day)
+						if (SAMS_result_time > latest_time)
+							newer_result_found = 1;
+				}
+				
+			}
+			if (newer_result_found)
+			{
+				latest_year = SAMS_result_year;
+				latest_month = SAMS_result_month;
+				latest_day = SAMS_result_day;
+				latest_time = SAMS_result_time;
+				strcpy(SAMS_latest_result, found_data.cFileName);
+			}
+		} while (FindNextFile(found_handle, &found_data)); //Find the next file.
+		FindClose(found_handle); //Always, Always, clean things up!
 		
+		sprintf(SAMS_resultfile_path, "%s%s", SAMS_resultfolder_path, SAMS_latest_result);
+		printf("Latest: %s\n", SAMS_resultfile_path);
+		FILE* SAMS_result_file = fopen(SAMS_resultfile_path,"r");
+		if (!SAMS_result_file)
+		{
+			printf("Error opening SAMS result file\n");
+			*ierr = 1;
+			return;
+		}
+		fclose(SAMS_result_file);
+		printf("SAMS result file succesfully opened and closed\n");
+
 		sams_tcp_socket = connect_to_SAMS();
 		csv_writer = CsvWriter_new(result_file_name, ";", 0);
 		for (int i = 0; i < nr_of_csv_ints; i++)
@@ -598,8 +720,10 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			return;
 		}
 
+		// SAMS writes output before it reads input (text based used control features of SAMS) 
 		// Receive kinematic and dynamic information from SAMS
 		iResult = recv(sams_tcp_socket, SAMS_to_GFEXFO.character_array, sizeof(SAMS_to_GFEXFO.double_precision), 0);
+		// TODO get additional data from SAMS log
 		if (iResult == 0)
 		{
 			// This never seems to happen
@@ -613,17 +737,37 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			*ierr = 1;
 			return;
 		}
-
+		// Rename the axis components and the angle for clarity
+		double e1 = SAMS_to_GFEXFO.double_precision[4];
+		double e2 = SAMS_to_GFEXFO.double_precision[5];
+		double e3 = SAMS_to_GFEXFO.double_precision[6];
+		double theta_aa = SAMS_to_GFEXFO.double_precision[7]; // Theta in axis-angle representation
 		// Calculations based on data received from SAMS
+		rotation_matrix_SAMS[0][0] = (1 - cos(theta_aa)) * e1 * e1 + cos(theta_aa);
+		rotation_matrix_SAMS[0][1] = (1 - cos(theta_aa)) * e1 * e2 - e3 * sin(theta_aa);
+		rotation_matrix_SAMS[0][2] = (1 - cos(theta_aa)) * e1 * e3 + e2 * sin(theta_aa);
+		rotation_matrix_SAMS[1][0] = (1 - cos(theta_aa)) * e2 * e1 + e3 * sin(theta_aa);
+		rotation_matrix_SAMS[1][1] = (1 - cos(theta_aa)) * e2 * e2 + cos(theta_aa);
+		rotation_matrix_SAMS[1][2] = (1 - cos(theta_aa)) * e2 * e3 - e1 * sin(theta_aa);
+		rotation_matrix_SAMS[2][0] = (1 - cos(theta_aa)) * e3 * e1 - e2 * sin(theta_aa);
+		rotation_matrix_SAMS[2][1] = (1 - cos(theta_aa)) * e3 * e2 + e1 * sin(theta_aa);
+		rotation_matrix_SAMS[2][2] = (1 - cos(theta_aa)) * e3 * e3 + cos(theta_aa);
+		// TODO express the difference between SAMS and SIMA rotation matrices, define a maximum value (1%?)
+		// Convert the Euler axis-angle representation to Tait-Bryan chained Z-Y-X rotations
+		// The calculations were analytically derived from the rotation matrix definition in SIMO manual, app.C
+		double theta_zyx = asin(-rotation_matrix_SAMS[2][0]); // Theta in Z-Y-X representation
+		double phi = asin(rotation_matrix_SAMS[2][1] / cos(theta_zyx));
+		double psi = asin(rotation_matrix_SAMS[1][0] / cos(theta_zyx));
+		displacement_SAMS[3] = phi;
+		displacement_SAMS[4] = theta_zyx;
+		displacement_SAMS[5] = psi;
 		for (int i = 0;i < 3;i++)
-		{
-			displacement_SAMS[i] = SAMS_to_GFEXFO.double_precision[1 + i];
-			rotation_axis_SAMS[i] = SAMS_to_GFEXFO.double_precision[4 + i];
-		}
-		for (int i = 0;i < 6;i++)
 		{
 			// Rename some received variables for clarity
 			displacement_SAMS[i] = SAMS_to_GFEXFO.double_precision[1 + i];
+		}
+		for (int i = 0;i < 6;i++)
+		{
 			velocity_SAMS_t0[i] = SAMS_to_GFEXFO.double_precision[8 + i];
 			// Calculate accelerations as backward finite differences of velocity.
 			acceleration_SAMS[i] =
@@ -637,14 +781,15 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			hydrostatic_force_SAMS[i] = (stiffness_reference_SIMA[i] - displacement_SAMS[i]) * stiffness_matrix_SIMA[i][i];
 		}
 
-		// SIMO receives forces through stor[] in kN, SAMS through TCP in N
+		// SIMO receives forces through stor[] in kN and kN*m
+		// SAMS receives forces through TCP in N and N*m
 		GFEXFO_to_SAMS.double_precision[0] = (double)time; // [s]
-		GFEXFO_to_SAMS.double_precision[1] = stor[0] * 1000;
-		GFEXFO_to_SAMS.double_precision[2] = stor[1] * 1000;
-		GFEXFO_to_SAMS.double_precision[3] = stor[2] * 1000;
-		GFEXFO_to_SAMS.double_precision[4] = stor[3] * 1000;
-		GFEXFO_to_SAMS.double_precision[5] = stor[4] * 1000;
-		GFEXFO_to_SAMS.double_precision[6] = stor[5] * 1000;
+		GFEXFO_to_SAMS.double_precision[1] = stor[0] * pow(10, 3); // 3 to get the same resultant acceleration
+		GFEXFO_to_SAMS.double_precision[2] = stor[1] * pow(10, 3);
+		GFEXFO_to_SAMS.double_precision[3] = stor[2] * pow(10, 3);
+		GFEXFO_to_SAMS.double_precision[4] = stor[3] * pow(10, 6); // 6 to get the same resultant acceleration. Why though?
+		GFEXFO_to_SAMS.double_precision[5] = stor[4] * pow(10, 6);
+		GFEXFO_to_SAMS.double_precision[6] = stor[5] * pow(10, 6);
 		iResult = send(sams_tcp_socket, GFEXFO_to_SAMS.character_array, sizeof(GFEXFO_to_SAMS.double_precision), 0);
 		if (iResult == SOCKET_ERROR)
 		{
@@ -746,6 +891,12 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			SAMS_to_GFEXFO.double_precision[5], // SAMS_rotAxisY
 			SAMS_to_GFEXFO.double_precision[6], // SAMS_rotAxisZ
 			SAMS_to_GFEXFO.double_precision[7], // SAMS_rotAngle
+			displacement_SAMS[0],
+			displacement_SAMS[1],
+			displacement_SAMS[2],
+			displacement_SAMS[3],
+			displacement_SAMS[4],
+			displacement_SAMS[5],
 			SAMS_to_GFEXFO.double_precision[8], // SAMS_linVelX
 			SAMS_to_GFEXFO.double_precision[9], // SAMS_linVelY
 			SAMS_to_GFEXFO.double_precision[10], // SAMS_linVelZ
@@ -800,7 +951,16 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			gamma_float.double_precision[0],
 			gamma_float.double_precision[1],
 			gamma_float.double_precision[2],
-			gamma_float.double_precision[3]
+			gamma_float.double_precision[3],
+			rotation_matrix_SAMS[0][0],
+			rotation_matrix_SAMS[0][1],
+			rotation_matrix_SAMS[0][2],
+			rotation_matrix_SAMS[1][0],
+			rotation_matrix_SAMS[1][1],
+			rotation_matrix_SAMS[1][2],
+			rotation_matrix_SAMS[2][0],
+			rotation_matrix_SAMS[2][1],
+			rotation_matrix_SAMS[2][2]
 		};
 		CsvWriter_nextRow(csv_writer);
 		char log_buffer[50];
