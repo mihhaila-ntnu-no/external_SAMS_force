@@ -82,6 +82,7 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	static double stiffness_matrix_SIMA[6][6]; // Hydrostatic restoring force is modeled as spring stiffness
 	static double stiffness_reference_SIMA[6]; // Hydrostatic equilibrium position
 	static char SAMS_resultfile_path[MCHEXT];
+	static FILE* SAMS_result_file;
 
 	// Assign constant forces
 	if (time > 5.)
@@ -269,9 +270,10 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	
 	// For error codes
 	int iResult;
+	// for getline()
+	char* line_buffer = NULL;
+	size_t line_buffer_size = 0;
 
-
-	
 	run_counter++;
 
 	double velocity_SIMA_t0[6];
@@ -396,20 +398,10 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 				latest_time = SAMS_result_time;
 				strcpy(SAMS_latest_result, found_data.cFileName);
 			}
-		} while (FindNextFile(found_handle, &found_data)); //Find the next file.
-		FindClose(found_handle); //Always, Always, clean things up!
-		
+		} while (FindNextFile(found_handle, &found_data)); // Find the next file.
+		FindClose(found_handle); // Always, Always, clean things up!
 		sprintf(SAMS_resultfile_path, "%s%s", SAMS_resultfolder_path, SAMS_latest_result);
-		printf("Latest: %s\n", SAMS_resultfile_path);
-		FILE* SAMS_result_file = fopen(SAMS_resultfile_path,"r");
-		if (!SAMS_result_file)
-		{
-			printf("Error opening SAMS result file\n");
-			*ierr = 1;
-			return;
-		}
-		fclose(SAMS_result_file);
-		printf("SAMS result file succesfully opened and closed\n");
+		printf("Reading SAMS result file: %s\n", SAMS_resultfile_path);
 
 		sams_tcp_socket = connect_to_SAMS();
 		csv_writer = CsvWriter_new(result_file_name, ";", 0);
@@ -441,10 +433,6 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			}
 		}
 
-		char* line_buffer = NULL;
-		size_t line_buffer_size = 0;
-		int line_count = 0;
-		ssize_t line_size;
 		FILE* sys_dat_file = fopen("sys.dat", "r");
 		if (!sys_dat_file)
 		{
@@ -452,14 +440,15 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			*ierr = 1;
 			return;
 		}
-		do
+		while (getline(&line_buffer, &line_buffer_size, sys_dat_file) >= 0)
 		{
+			if (strcmp(line_buffer, " MASS COEFFICIENTS\n") == 0)
+				break;
+		}
+		// Skip the separator line and headers
+		for (int i=0;i<2;i++)
 			getline(&line_buffer, &line_buffer_size, sys_dat_file);
-		} while (strcmp(line_buffer, " MASS COEFFICIENTS\n"));
-		getline(&line_buffer, &line_buffer_size, sys_dat_file); // Skip the separator line
-		getline(&line_buffer, &line_buffer_size, sys_dat_file); // Skip the headers
-		line_size = getline(&line_buffer, &line_buffer_size, sys_dat_file);
-		if (line_size != 114)
+		if (getline(&line_buffer, &line_buffer_size, sys_dat_file) != 114)
 			printf("Warning reading mass coefficients from sys.dat: unexpected length of line\n");
 		iResult = sscanf
 		(
@@ -481,14 +470,14 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		}
 		mass_matrix_SIMA[1][1] = mass_matrix_SIMA[0][0];
 		mass_matrix_SIMA[2][2] = mass_matrix_SIMA[0][0];
-		do
+		while (getline(&line_buffer, &line_buffer_size, sys_dat_file) >= 0)
 		{
-			getline(&line_buffer, &line_buffer_size, sys_dat_file);
-		} while (strcmp(line_buffer, " STIFFNESS REFERENCE\n"));
-		getline(&line_buffer, &line_buffer_size, sys_dat_file); // Skip the separator line
-		getline(&line_buffer, &line_buffer_size, sys_dat_file); // Skip the headers
-		line_size = getline(&line_buffer, &line_buffer_size, sys_dat_file);
-		if (line_size != 99)
+			if (strcmp(line_buffer, " STIFFNESS REFERENCE\n") == 0)
+				break;
+		}
+		for (int i = 0;i < 2;i++)
+			getline(&line_buffer, &line_buffer_size, sys_dat_file); // Skip the separator line and headers
+		if (getline(&line_buffer, &line_buffer_size, sys_dat_file) != 99)
 			printf("Warning reading stiffness reference from sys.dat: unexpected length of line\n");
 		iResult = sscanf
 		(
@@ -507,14 +496,14 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			*ierr = 1;
 			return;
 		}
-		do
+		while (getline(&line_buffer, &line_buffer_size, sys_dat_file) >= 0)
 		{
-			getline(&line_buffer, &line_buffer_size, sys_dat_file);
-		} while (strcmp(line_buffer, "'KMAT\n"));
+			if (strcmp(line_buffer, "'KMAT\n") == 0)
+				break;
+		}
 		for (int i = 0;i < 6;i++)
 		{
-			line_size = getline(&line_buffer, &line_buffer_size, sys_dat_file);
-			if (line_size != 86)
+			if (getline(&line_buffer, &line_buffer_size, sys_dat_file) != 86)
 				printf("Warning reading stiffness matrix from sys.dat: unexpected length of line\n");
 			iResult = sscanf
 			(
@@ -553,10 +542,11 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			*ierr = 1;
 			return;
 		}
-		do
+		while (getline(&line_buffer, &line_buffer_size, structure_file) >= 0)
 		{
-			getline(&line_buffer, &line_buffer_size, structure_file);
-		} while (!strstr(line_buffer, "\"structureMass\""));
+			if (strstr(line_buffer, "\"structureMass\""))
+				break;
+		}
 		iResult = sscanf(line_buffer, " \" structureMass \" : %lf ", &mass_matrix_SAMS[0][0]);
 		if (iResult != 1)
 		{
@@ -570,10 +560,11 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		// Do not know whether the mass or the radii come first, so search from the top
 		fclose(structure_file);
 		structure_file = fopen(structure_file_path, "r");
-		do
+		while (getline(&line_buffer, &line_buffer_size, structure_file) >= 0)
 		{
-			getline(&line_buffer, &line_buffer_size, structure_file);
-		} while (!strstr(line_buffer, "\"structureRadiusOfGyration\""));
+			if (strstr(line_buffer, "\"structureRadiusOfGyration\""))
+				break;
+		}
 		iResult = sscanf
 		(
 			line_buffer,
@@ -622,6 +613,22 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 				}
 			}
 		}
+
+		SAMS_result_file = fopen(SAMS_resultfile_path, "r");
+		if (!SAMS_result_file)
+		{
+			printf("Error opening SAMS result file\n");
+			*ierr = 1;
+			return;
+		}
+		for (int i = 0;i < 5;i++)
+		{
+			int line_length = getline(&line_buffer, &line_buffer_size, SAMS_result_file);
+			if (line_length < 0)
+				break;
+			printf("Size: %04d Content: %s", line_length, line_buffer);
+		}
+		
 	}
 
 	// Calculate what we can in 6DoF without having received anything from SAMS
@@ -723,7 +730,18 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		// SAMS writes output before it reads input (text based used control features of SAMS) 
 		// Receive kinematic and dynamic information from SAMS
 		iResult = recv(sams_tcp_socket, SAMS_to_GFEXFO.character_array, sizeof(SAMS_to_GFEXFO.double_precision), 0);
-		// TODO get additional data from SAMS log
+		
+		for (int i = 0;i < 1;i++)
+		{
+			int line_length = getline(&line_buffer, &line_buffer_size, SAMS_result_file);
+			if (line_length < 0)
+			{
+				printf("Error getting line from SAMS result file\n");
+				break;
+			}
+			printf("Time:%.1f Size: %04d Content: %s",time, line_length, line_buffer);
+		}
+
 		if (iResult == 0)
 		{
 			// This never seems to happen
@@ -1015,6 +1033,9 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		}
 		CsvWriter_destroy(csv_writer);
 		printf("Disconnected from SAMS, results saved in %s\n",result_file_name);
+
+		fclose(SAMS_result_file); // TODO clean up this file also in case of ungraceful exit
+
 	}
 
 	*ierr = 0;
