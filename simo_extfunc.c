@@ -295,6 +295,7 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	double rotation_velocity_positive_jump;
 	double rotation_acceleration_negative_jump;
 	double rotation_acceleration_positive_jump;
+	double SAMS_txt_output[47];
 
 	// Back-initialize the SIMA displacements to avoid initial jerk
 	if (run_counter == 1)
@@ -306,10 +307,10 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		}
 	}
 
-	// First run, open the SAMS connection and write the log headers
+	// First run
 	if (step_nr == 1 && substep_nr == 1 && iteration_nr == 0)
 	{
-
+		// Prepare the paths for relevant SAMS files
 		char itconfig_file_path[MCHEXT];
 		// These string parameters are defined in the "External DLL force" dialog in SIMA
 		// They are passed to this function with a leading space and without a zero termination
@@ -525,6 +526,7 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		}
 		fclose(sys_dat_file);
 
+		// TODO this search routine is done more than once, rewrite as function
 		FILE* itconfig_file = fopen(itconfig_file_path, "r");
 		if (!itconfig_file)
 		{
@@ -532,7 +534,25 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			*ierr = 1;
 			return;
 		}
-		// TODO check that SAMS simulates one timestep less than SIMA
+		while (getline(&line_buffer, &line_buffer_size, itconfig_file) >= 0)
+		{
+			if (strstr(line_buffer, "\"maxSimulationTime\""))
+				break;
+		}
+		double SAMS_maxSimulationTime;
+		if (sscanf(line_buffer, " \" maxSimulationTime \" : %lf ", &SAMS_maxSimulationTime) != 1)
+		{
+			printf("Error parsing maxSimulationTime from:%s\n", itconfig_file_path);
+			*ierr = 1;
+			return;
+		}
+		if ((SAMS_maxSimulationTime - (nr_of_steps-1) * dt) > dt)
+		{
+			printf("Error: SAMS should simulate one timestep less than SIMA.\n");
+			printf("SAMS maxSimulationTime : %.1f SIMA : %.1f dt: %.1f\n", SAMS_maxSimulationTime, nr_of_steps * dt, dt);
+			*ierr = 1;
+			return;
+		}
 		fclose(itconfig_file);
 
 		FILE* structure_file = fopen(structure_file_path, "r");
@@ -547,11 +567,9 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			if (strstr(line_buffer, "\"structureMass\""))
 				break;
 		}
-		iResult = sscanf(line_buffer, " \" structureMass \" : %lf ", &mass_matrix_SAMS[0][0]);
-		if (iResult != 1)
+		if (sscanf(line_buffer, " \" structureMass \" : %lf ", &mass_matrix_SAMS[0][0]) != 1)
 		{
-			// TODO show the actual file paths in these messages
-			printf("Error parsing structure mass from structure file\n");
+			printf("Error parsing structure mass from:%s\n",structure_file_path);
 			*ierr = 1;
 			return;
 		}
@@ -620,15 +638,7 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 			printf("Error opening SAMS result file\n");
 			*ierr = 1;
 			return;
-		}
-		for (int i = 0;i < 5;i++)
-		{
-			int line_length = getline(&line_buffer, &line_buffer_size, SAMS_result_file);
-			if (line_length < 0)
-				break;
-			printf("Size: %04d Content: %s", line_length, line_buffer);
-		}
-		
+		}		
 	}
 
 	// Calculate what we can in 6DoF without having received anything from SAMS
@@ -731,15 +741,49 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 		// Receive kinematic and dynamic information from SAMS
 		iResult = recv(sams_tcp_socket, SAMS_to_GFEXFO.character_array, sizeof(SAMS_to_GFEXFO.double_precision), 0);
 		
-		for (int i = 0;i < 1;i++)
+		int lines_to_read;
+		if (step_nr < 2) // Headers not written yet, avoid EOF error
+			lines_to_read = 0;
+		else if (step_nr == 2) // Headers written , catch up
+			lines_to_read = 8;
+		else // Keep catching up
+			lines_to_read = 1;
+		for (int i = 0;i < lines_to_read;i++)
 		{
 			int line_length = getline(&line_buffer, &line_buffer_size, SAMS_result_file);
 			if (line_length < 0)
 			{
 				printf("Error getting line from SAMS result file\n");
-				break;
+				*ierr = 1;
+				return;
 			}
-			printf("Time:%.1f Size: %04d Content: %s",time, line_length, line_buffer);
+		}
+		if (lines_to_read)
+		{
+			int current_index = 0;
+			int offset = 0;
+
+			for (int i = 0;i < 47;i++) // 47 columns in the SAMS text output file
+			{
+				if (sscanf(line_buffer + current_index, " %lf %n", &SAMS_txt_output[i], &offset) != 1)
+				{
+					// TODO show the actual file paths in these messages
+					printf("Error parsing SAMS result file\n");
+					*ierr = 1;
+					return;
+				}
+				current_index += offset;
+			}
+			// Rename some SAMS text output values for clarity
+			double SAMS_txt_time = SAMS_txt_output[0];
+			if (SAMS_txt_time - time >= dt)
+			{
+				printf("Time mismatch: SIMA %f, SAMS log %f\n", time, SAMS_txt_time);
+				*ierr = 1;
+				return;
+			}
+			//printf("Time: %.1f TCP central surge: %.1e\n", SAMS_txt_time,SAMS_txt_output[14]);
+			// TODO sum all the different ice forces together
 		}
 
 		if (iResult == 0)
