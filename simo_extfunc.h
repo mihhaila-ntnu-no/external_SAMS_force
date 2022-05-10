@@ -21,3 +21,5 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 	float* stor, int* ierr);
 
 SOCKET connect_to_SAMS();
+
+int send_to_SAMS(SOCKET sams_tcp_socket, double time, double central_forces[6]);
