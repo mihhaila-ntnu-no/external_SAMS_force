@@ -23,3 +23,5 @@ void CAL_CONV gfexfo_(int* iwa, float* rwa, double* dwa, int* ipdms,
 SOCKET connect_to_SAMS();
 
 int send_to_SAMS(SOCKET sams_tcp_socket, double time, double central_forces[6]);
+
+int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_time, double displacement_SAMS[6], double rotation_matrix_SAMS[3][3]);

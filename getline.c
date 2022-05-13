@@ -16,7 +16,6 @@ ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
     int c;
 
     if (lineptr == NULL || stream == NULL || n == NULL) {
-	printf("getline(): one of the input arguments is NULL\n");
         errno = EINVAL;
         return -1;
     }

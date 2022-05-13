@@ -5,6 +5,9 @@
 #include "simo_extfunc.h"
 #include "csvwriter.h"
 #include "getline.h"
+#include "errno.h"
+
+extern int errno;
 
 void CAL_CONV gfexfo_
 (
@@ -39,21 +42,7 @@ void CAL_CONV gfexfo_
 	// In case of an error, *ierr will be set to a negative value and gfexfo_() will return
 	// The error values decrease sequentially as they appear in the code, but this hasn't shown up in SIMA so far
 	*ierr = 0;
-	// If this is not the first iteration of the timestep, return the forces from the first one
-	if (iinfo[11] > 0) // iinfo[11] = iteration nr, starting from 0
-	{
-		// TODO return SAMS_ice_force from a previous run
-		stor[0] = 0.; // [kN] surge
-		stor[1] = 0.; // [kN] sway
-		stor[2] = 0.; // [kN] heave
-		stor[3] = 0.; // [MN*m] roll
-		stor[4] = 0.; // [MN*m] pitch
-		stor[5] = 0.; // [MN*m] yaw
-		stor[6] = 0.; // reserved, don't touch
-		stor[7] = 0.; // reserved, don't touch
-		stor[8] = 0.; // reserved, don't touch
-		return;
-	}
+
 	// Function argument aliases
 	int body_nr = iinfo[2]-1; // bodies are indexed starting with 1
 	int step_nr = iinfo[5];
@@ -103,168 +92,27 @@ void CAL_CONV gfexfo_
 	static double displacement_SIMA_tm1[6]; // Timestep t = -1.
 	static double displacement_SIMA_tm2[6]; // Timestep t = -2
 	static double velocity_SAMS_tm1[6]; // Timestep t = -1
-	static double mass_matrix_SIMA[6][6]; // [t=kg*10^3]
+	static double mass_matrix_SIMA[6][6]; // [kg*10^3, kg*m^2*10^3]
 	static double mass_matrix_SAMS[6][6]; // [kg]
-	static double stiffness_matrix_SIMA[6][6]; // Hydrostatic restoring force is modeled as spring stiffness
-	static double stiffness_reference_SIMA[6]; // Hydrostatic equilibrium position
 	static char SAMS_resultfile_path[MCHEXT];
 	static FILE* SAMS_result_file;
-	static double SAMS_ice_force[6];
+	static double F_ice_SIMA_local[6];
+	//  Hydrostatic restoring force is modeled as spring stiffness
+	static double stiffness_matrix_SIMA[6][6]; // [kN/m, kN*m]
+	static double stiffness_reference_SIMA[6]; // [m, rad] Hydrostatic equilibrium position
 
-	// Assign forces external to SIMA
+	// If this is not the first iteration of the timestep, return the forces from the first one
+	if (iinfo[11] > 0) // iinfo[11] = iteration nr, starting from 0
 	{
-		stor[0] = 0.; // [kN] surge
-		stor[1] = 0.; // [kN] sway
-		stor[2] = 0.; // [kN] heave
-		stor[3] = 0.; // [MN*m] roll
-		stor[4] = 0.; // [MN*m] pitch
-		stor[5] = 0.; // [MN*m] yaw
-		stor[6] = 0.; // reserved, don't touch
-		stor[7] = 0.; // reserved, don't touch
-		stor[8] = 0.; // reserved, don't touch
+		for (int i = 0;i < 3;i++)
+		{
+			stor[i] = F_ice_SIMA_local[i];
+			stor[3 + i] = F_ice_SIMA_local[3 + i];
+			stor[6 + i] = 0.; // "internal parameter", don't know what for
+		}
+		*ierr = 0;
+		return;
 	}
-
-	// Log file and column names
-	char* gfexfo_result_file_name = "gfexfo_sams.csv";
-	char* csv_ints_header[] =
-	{
-		"iwa",
-		"ipdms",
-		"IMODE",
-		"MODULE",
-		"IBDY",
-		"IBDTYP",
-		"NBDY",
-		"ISTEP",
-		"NSTEP",
-		"IEXTRA",
-		"NEXTRA",
-		"IGRAV",
-		"ISTORE",
-		"ITER",
-		"npcur",
-		"kxfo",
-		"ixfo",
-		"iextf",
-		"icoord",
-		"nint",
-		"nrea",
-		"nsto",
-		"nstr",
-	};
-	char* csv_floats_header[] =
-	{
-		"rwa",
-		"TIME",
-		"DT",
-		"GRAV",
-		"RHOW",
-		"RHOA",
-		"DEPTH",
-		"curcor",
-		"curvel",
-		"rxfo",
-		"rhxfo",
-		"stor_0",
-		"stor_1",
-		"stor_2",
-		"stor_3",
-		"stor_4",
-		"stor_5",
-		"stor_6",
-		"stor_7",
-		"stor_8"
-	};
-	char* csv_doubles_header[] =
-	{
-		"dwa",
-		"XGLB",
-		"YGLB",
-		"ZGLB",
-		"FI",
-		"THETA",
-		"PSI",
-		"velocity_SIMA_0",
-		"velocity_SIMA_1",
-		"velocity_SIMA_2",
-		"velocity_SIMA_3",
-		"velocity_SIMA_4",
-		"velocity_SIMA_5",
-		"acceleration_SIMA_0",
-		"acceleration_SIMA_1",
-		"acceleration_SIMA_2",
-		"acceleration_SIMA_3",
-		"acceleration_SIMA_4",
-		"acceleration_SIMA_5",
-		"inertial_force_SIMA_0",
-		"inertial_force_SIMA_1",
-		"inertial_force_SIMA_2",
-		"inertial_force_SIMA_3",
-		"inertial_force_SIMA_4",
-		"inertial_force_SIMA_5",
-		"hydrostatic_force_SIMA_0",
-		"hydrostatic_force_SIMA_1",
-		"hydrostatic_force_SIMA_2",
-		"hydrostatic_force_SIMA_3",
-		"hydrostatic_force_SIMA_4",
-		"hydrostatic_force_SIMA_5",
-		"SAMS_Time",
-		"displacement_SAMS_0",
-		"displacement_SAMS_1",
-		"displacement_SAMS_2",
-		"displacement_SAMS_3",
-		"displacement_SAMS_4",
-		"displacement_SAMS_5",
-		"acceleration_SAMS_0",
-		"acceleration_SAMS_1",
-		"acceleration_SAMS_2",
-		"acceleration_SAMS_3",
-		"acceleration_SAMS_4",
-		"acceleration_SAMS_5",
-		"inertial_force_SAMS_0",
-		"inertial_force_SAMS_1",
-		"inertial_force_SAMS_2",
-		"inertial_force_SAMS_3",
-		"inertial_force_SAMS_4",
-		"inertial_force_SAMS_5",
-		"hydrostatic_force_SAMS_0",
-		"hydrostatic_force_SAMS_1",
-		"hydrostatic_force_SAMS_2",
-		"hydrostatic_force_SAMS_3",
-		"hydrostatic_force_SAMS_4",
-		"hydrostatic_force_SAMS_5",
-		"rotation_matrix_SIMA_0_0",
-		"rotation_matrix_SIMA_0_1",
-		"rotation_matrix_SIMA_0_2",
-		"rotation_matrix_SIMA_1_0",
-		"rotation_matrix_SIMA_1_1",
-		"rotation_matrix_SIMA_1_2",
-		"rotation_matrix_SIMA_2_0",
-		"rotation_matrix_SIMA_2_1",
-		"rotation_matrix_SIMA_2_2",
-		"gamma_0",
-		"gamma_1",
-		"gamma_2",
-		"gamma_3",
-		"rotation_matrix_SAMS_0_0",
-		"rotation_matrix_SAMS_0_1",
-		"rotation_matrix_SAMS_0_2",
-		"rotation_matrix_SAMS_1_0",
-		"rotation_matrix_SAMS_1_1",
-		"rotation_matrix_SAMS_1_2",
-		"rotation_matrix_SAMS_2_0",
-		"rotation_matrix_SAMS_2_1",
-		"rotation_matrix_SAMS_2_2",
-		"SAMS_ice_force_0",
-		"SAMS_ice_force_1",
-		"SAMS_ice_force_2",
-		"SAMS_ice_force_3",
-		"SAMS_ice_force_4",
-		"SAMS_ice_force_5",
-	};
-	int nr_of_csv_ints = (int)sizeof(csv_ints_header) / sizeof(csv_ints_header[0]);
-	int nr_of_csv_floats = (int)sizeof(csv_floats_header) / sizeof(csv_floats_header[0]);
-	int nr_of_csv_doubles = (int)sizeof(csv_doubles_header) / sizeof(csv_doubles_header[0]);
 
 	// Working variables
 	double velocity_SIMA_t0[6];
@@ -276,27 +124,139 @@ void CAL_CONV gfexfo_
 	double inertial_force_SAMS[6]; // [N]
 	double hydrostatic_force_SIMA[6]; // [kN, MN*m]
 	double hydrostatic_force_SAMS[6]; // [N]
-	double rotation_matrix_SIMA[3][3];
-	double rotation_matrix_SAMS[3][3];
+	double rotation_matrix_SIMA[3][3]; // From global to local
+	double rotation_matrix_SAMS[3][3]; // So X_global = matrix x X_local
 	double SAMS_txt_output[47];
-	double F_coupled_global[6]; // Sea forces on structure, as opposed to ice forces
-	double F_coupled_local[6];
+	double F_ice_global[6];
+	double F_sea_global[6]; // Sea forces on structure, as opposed to ice forces
+	double F_sea_SAMS_local[6];
+	double F_coupled_global[6]; // [kN, MN*m] Forces from both sea and ice, calculated by SIMA
 	double SAMS_time;
+	
 	int iResult; // For error codes
 	char* line_buffer = NULL; // for getline()
 	size_t line_buffer_size = 0; // for getline()
+	int nr_of_csv_ints; // For logging
+	int nr_of_csv_floats;
+	int nr_of_csv_doubles;
+	char* gfexfo_result_file_name = "gfexfo_sams.csv";
 	
-	// Calculate kinematic state, state-dependent forces, global->body transformation matrix
+	// Initialize SIMA-related information
+	if (run_counter == 1)
 	{
 		// Back-initialize the SIMA displacements to avoid calculating an unphysical initial jerk
-		if (run_counter == 1)
+		for (int i = 0;i < 6;i++)
 		{
+			displacement_SIMA_tm1[i] = displacement_SIMA_t0.double_precision[i];
+			displacement_SIMA_tm2[i] = displacement_SIMA_t0.double_precision[i];
+		}
+		// Read the M and K matrices from sys.dat
+		{
+			FILE* sys_dat_file;
+			char* sys_dat_filename = "sys-sima.dat";
+			sys_dat_file = fopen(sys_dat_filename, "r");
+			if (!sys_dat_file)
+			{
+				sys_dat_filename = "sys.dat";
+				sys_dat_file = fopen(sys_dat_filename, "r");
+				if (!sys_dat_file)
+				{
+					printf("Could not open either sys.dat or sys-sima.dat\n");
+					*ierr = -7;
+					return;
+				}
+			}
+			while (getline(&line_buffer, &line_buffer_size, sys_dat_file) >= 0)
+			{
+				if (strcmp(line_buffer, " MASS COEFFICIENTS\n") == 0)
+					break;
+			}
+			// Skip the separator line and headers
+			for (int i = 0;i < 2;i++)
+				getline(&line_buffer, &line_buffer_size, sys_dat_file);
+			if (getline(&line_buffer, &line_buffer_size, sys_dat_file) != 114)
+				printf("Warning reading mass coefficients from sys.dat: unexpected length of line\n");
+			iResult = sscanf
+			(
+				line_buffer,
+				"%le%le%le%le%le%le%le\n",
+				&mass_matrix_SIMA[0][0],
+				&mass_matrix_SIMA[3][3],
+				&mass_matrix_SIMA[4][3],
+				&mass_matrix_SIMA[4][4],
+				&mass_matrix_SIMA[5][3],
+				&mass_matrix_SIMA[5][4],
+				&mass_matrix_SIMA[5][5]
+			);
+			if (iResult != 7)
+			{
+				printf("Error parsing mass coefficients from sys.dat\n");
+				*ierr = -8;
+				return;
+			}
+			mass_matrix_SIMA[1][1] = mass_matrix_SIMA[0][0];
+			mass_matrix_SIMA[2][2] = mass_matrix_SIMA[0][0];
+			while (getline(&line_buffer, &line_buffer_size, sys_dat_file) >= 0)
+			{
+				if (strcmp(line_buffer, " STIFFNESS REFERENCE\n") == 0)
+					break;
+			}
+			for (int i = 0;i < 2;i++)
+				getline(&line_buffer, &line_buffer_size, sys_dat_file); // Skip the separator line and headers
+
+			int line_length = getline(&line_buffer, &line_buffer_size, sys_dat_file);
+			if (line_length < 98 || line_length > 104)
+				printf("Warning reading stiffness reference from %s: unexpected line length\n", sys_dat_filename);
+			iResult = sscanf
+			(
+				line_buffer,
+				"%le%le%le%le%le%le\n",
+				&stiffness_reference_SIMA[0],
+				&stiffness_reference_SIMA[1],
+				&stiffness_reference_SIMA[2],
+				&stiffness_reference_SIMA[3],
+				&stiffness_reference_SIMA[4],
+				&stiffness_reference_SIMA[5]
+			);
+			if (iResult != 6)
+			{
+				printf("Error parsing stiffness coefficients from sys.dat\n");
+				*ierr = -9;
+				return;
+			}
+			while (getline(&line_buffer, &line_buffer_size, sys_dat_file) >= 0)
+			{
+				if (strcmp(line_buffer, "'KMAT\n") == 0)
+					break;
+			}
 			for (int i = 0;i < 6;i++)
 			{
-				displacement_SIMA_tm1[i] = displacement_SIMA_t0.double_precision[i];
-				displacement_SIMA_tm2[i] = displacement_SIMA_t0.double_precision[i];
+				if (getline(&line_buffer, &line_buffer_size, sys_dat_file) != 86)
+					printf("Warning reading stiffness matrix from sys.dat: unexpected length of line\n");
+				iResult = sscanf
+				(
+					line_buffer,
+					"%lf%lf%lf%lf%lf%lf\n",
+					&stiffness_matrix_SIMA[i][0],
+					&stiffness_matrix_SIMA[i][1],
+					&stiffness_matrix_SIMA[i][2],
+					&stiffness_matrix_SIMA[i][3],
+					&stiffness_matrix_SIMA[i][4],
+					&stiffness_matrix_SIMA[i][5]
+				);
+				if (iResult != 6)
+				{
+					printf("Error parsing stiffness coefficients from sys.dat\n");
+					*ierr = -10;
+					return;
+				}
 			}
-		}
+			fclose(sys_dat_file);
+		};
+	};
+
+	// Calculate kinematic state, state-dependent forces, global->body transformation matrix
+	{
 		// Calculate kinematic state in global coordinates from displacement history
 		for (int i = 0;i < 3;i++)
 		{
@@ -339,6 +299,13 @@ void CAL_CONV gfexfo_
 				velocity_SIMA_t0[3 + i] = rotation_velocity_negative_jump;
 			if (abs(velocity_SIMA_t0[3 + i]) > abs(rotation_velocity_positive_jump))
 				velocity_SIMA_t0[3 + i] = rotation_velocity_positive_jump;
+			// TODO these are rotational joint velocities, each of them has its own coordinate frame
+			// This method of finding the accelerations neglects the fact that the coordinate frames change over dt
+			// Rather, the joint velocities should be converted to a angular velocity vector in the global frame
+			// Then, will its derivative be equal to an acceleration vector? Maybe, check literature
+			// TODO a Google search even suggests that the acceleration vector could be found by differentiating the rotation matrix
+			// With small angles, the rotational joint velocities are very close to the global-frame angular velocities
+			// All this shown on paper notes, page 9
 			acceleration_SIMA[3 + i] =
 				(
 					displacement_SIMA_tm2[3 + i]
@@ -380,6 +347,7 @@ void CAL_CONV gfexfo_
 		rotation_matrix_SIMA[2][1] = cos(theta) * sin(phi);
 		rotation_matrix_SIMA[2][2] = cos(theta) * cos(phi);
 		// Calculate forces acting on structure, in global coordinates
+		// TODO units?
 		for (int i = 0;i < 6;i++)
 		{
 			inertial_force_SIMA[i] = acceleration_SIMA[i] * mass_matrix_SIMA[i][i];
@@ -388,18 +356,9 @@ void CAL_CONV gfexfo_
 				* stiffness_matrix_SIMA[i][i];
 			F_coupled_global[i] = inertial_force_SIMA[i] + hydrostatic_force_SIMA[i];
 		}
-		// Transform the forces from global coordinate system to local
-		for (int i = 0;i < 3;i++)
-		{
-			F_coupled_local[i] = 0;
-			for (int j = 0;j < 3;j++)
-				F_coupled_local[i] += rotation_matrix_SIMA[j][i] * F_coupled_global[j];
-			// The rotational forces are the same in both coordinate systems
-			F_coupled_local[3 + i] = F_coupled_global[3 + i];
-		}
 	}
 
-	// First run
+	// Initialize SAMS-related information
 	if (run_counter == 1)
 	{
 		sams_tcp_socket = connect_to_SAMS();
@@ -413,7 +372,7 @@ void CAL_CONV gfexfo_
 		// The initial timestep i=0 happened without calling gfexfo_(), nothing was logged from that timestep
 		// Similarly, the initial timestep i=0 is received from SAMS, but nothing is done with it
 		// Instead, it will be shortly overwritten by the information of i=1
-		iResult = receive_from_SAMS(sams_tcp_socket, &SAMS_time, displacement_SAMS, velocity_SAMS_t0, rotation_matrix_SAMS);
+		iResult = receive_from_SAMS(sams_tcp_socket, &SAMS_time, displacement_SAMS, rotation_matrix_SAMS);
 		if (iResult == 0) // This happens if SIMA simulates more timesteps than SAMS
 		{
 			printf("Warning: SAMS connection is closed\n");
@@ -427,7 +386,18 @@ void CAL_CONV gfexfo_
 		}
 		// On the first timestep, ice forces are absent.
 		// The state-dependent forces Mx''+Kx are equal to the sea forces. F_coupled = F_sea
-		if (send_to_SAMS(sams_tcp_socket, 0.0, F_coupled_local) == SOCKET_ERROR)
+		// Transform the sea forces from global coordinate system to SAMS local
+		for (int i = 0;i < 3;i++)
+		{
+			F_sea_SAMS_local[i] = 0;
+			F_sea_SAMS_local[3 + i] = 0;
+			for (int j = 0;j < 3;j++)
+			{
+				F_sea_SAMS_local[i] += rotation_matrix_SAMS[j][i] * F_coupled_global[j] * pow(10, 3); // kN -> N
+				F_sea_SAMS_local[3 + i] += rotation_matrix_SAMS[j][i] * F_coupled_global[3 + j] * pow(10, 6); // MN*m -> N*m
+			}
+		}
+		if (send_to_SAMS(sams_tcp_socket, 0.0, F_sea_SAMS_local) == SOCKET_ERROR)
 		{
 			printf("Error sending TCP data to SAMS: %d\n", WSAGetLastError());
 			closesocket(sams_tcp_socket);
@@ -550,141 +520,19 @@ void CAL_CONV gfexfo_
 				*ierr = -3;
 				return;
 			}
+			// At this point, 8 non-zero lines should exist in the result file, the last of them i=1
+			for (int i = 0;i < 7;i++)
+				if (getline(&line_buffer, &line_buffer_size, SAMS_result_file) < 0)
+				{
+					// Something weird is happening here.
+					// For no obvious reason, this line read fails on some simulations and then succeeds after an unrelated change and recompile
+					// If it happens again, read getline.c and figure out what exactly is going wrong
+					printf("Error %d getting header line %d from SAMS result file\n", errno, i);
+					*ierr = -18;
+					return;
+				}
 		};
-		// Write the log headers
-		{
-			csv_writer = CsvWriter_new(gfexfo_result_file_name, ";", 0);
-			for (int i = 0; i < nr_of_csv_ints; i++)
-			{
-				if (CsvWriter_writeField(csv_writer, csv_ints_header[i]))
-				{
-					printf("Error writing .csv file: %s\n", CsvWriter_getErrorMessage(csv_writer));
-					*ierr = -4;
-					return;
-				}
-			}
-			for (int i = 0; i < nr_of_csv_floats; i++)
-			{
-				if (CsvWriter_writeField(csv_writer, csv_floats_header[i]))
-				{
-					printf("Error writing to .csv file: %s\n", CsvWriter_getErrorMessage(csv_writer));
-					*ierr = -5;
-					return;
-				}
-			}
-			for (int i = 0; i < nr_of_csv_doubles; i++)
-			{
-				if (CsvWriter_writeField(csv_writer, csv_doubles_header[i]))
-				{
-					printf("Error writing .csv file: %s\n", CsvWriter_getErrorMessage(csv_writer));
-					*ierr = -6;
-					return;
-				}
-			}
-		}
-		// Read the M and K matrices from sys.dat
-		{
-			FILE* sys_dat_file;
-			char* sys_dat_filename = "sys-sima.dat";
-			sys_dat_file = fopen(sys_dat_filename, "r");
-			if (!sys_dat_file)
-			{
-				sys_dat_filename = "sys.dat";
-				sys_dat_file = fopen(sys_dat_filename, "r");
-				if (!sys_dat_file)
-				{
-					printf("Could not open either sys.dat or sys-sima.dat\n");
-					*ierr = -7;
-					return;
-				}
-			}
-			while (getline(&line_buffer, &line_buffer_size, sys_dat_file) >= 0)
-			{
-				if (strcmp(line_buffer, " MASS COEFFICIENTS\n") == 0)
-					break;
-			}
-			// Skip the separator line and headers
-			for (int i = 0;i < 2;i++)
-				getline(&line_buffer, &line_buffer_size, sys_dat_file);
-			if (getline(&line_buffer, &line_buffer_size, sys_dat_file) != 114)
-			printf("Warning reading mass coefficients from sys.dat: unexpected length of line\n");
-			iResult = sscanf
-			(
-				line_buffer,
-				"%le%le%le%le%le%le%le\n",
-				&mass_matrix_SIMA[0][0],
-				&mass_matrix_SIMA[3][3],
-				&mass_matrix_SIMA[4][3],
-				&mass_matrix_SIMA[4][4],
-				&mass_matrix_SIMA[5][3],
-				&mass_matrix_SIMA[5][4],
-				&mass_matrix_SIMA[5][5]
-			);
-			if (iResult != 7)
-			{
-				printf("Error parsing mass coefficients from sys.dat\n");
-				*ierr = -8;
-				return;
-			}
-			mass_matrix_SIMA[1][1] = mass_matrix_SIMA[0][0];
-			mass_matrix_SIMA[2][2] = mass_matrix_SIMA[0][0];
-			while (getline(&line_buffer, &line_buffer_size, sys_dat_file) >= 0)
-			{
-				if (strcmp(line_buffer, " STIFFNESS REFERENCE\n") == 0)
-					break;
-			}
-			for (int i = 0;i < 2;i++)
-				getline(&line_buffer, &line_buffer_size, sys_dat_file); // Skip the separator line and headers
 
-			int line_length = getline(&line_buffer, &line_buffer_size, sys_dat_file);
-			if (line_length < 98 || line_length > 104)
-			printf("Warning reading stiffness reference from %s: unexpected line length\n", sys_dat_filename);
-			iResult = sscanf
-			(
-				line_buffer,
-				"%le%le%le%le%le%le\n",
-				&stiffness_reference_SIMA[0],
-				&stiffness_reference_SIMA[1],
-				&stiffness_reference_SIMA[2],
-				&stiffness_reference_SIMA[3],
-				&stiffness_reference_SIMA[4],
-				&stiffness_reference_SIMA[5]
-			);
-			if (iResult != 6)
-			{
-				printf("Error parsing stiffness coefficients from sys.dat\n");
-				*ierr = -9;
-				return;
-			}
-			while (getline(&line_buffer, &line_buffer_size, sys_dat_file) >= 0)
-			{
-				if (strcmp(line_buffer, "'KMAT\n") == 0)
-					break;
-			}
-			for (int i = 0;i < 6;i++)
-			{
-				if (getline(&line_buffer, &line_buffer_size, sys_dat_file) != 86)
-					printf("Warning reading stiffness matrix from sys.dat: unexpected length of line\n");
-				iResult = sscanf
-				(
-					line_buffer,
-					"%lf%lf%lf%lf%lf%lf\n",
-					&stiffness_matrix_SIMA[i][0],
-					&stiffness_matrix_SIMA[i][1],
-					&stiffness_matrix_SIMA[i][2],
-					&stiffness_matrix_SIMA[i][3],
-					&stiffness_matrix_SIMA[i][4],
-					&stiffness_matrix_SIMA[i][5]
-				);
-				if (iResult != 6)
-				{
-					printf("Error parsing stiffness coefficients from sys.dat\n");
-					*ierr = -10;
-					return;
-				}
-			}
-			fclose(sys_dat_file);
-		};
 		// Check that the simulation is set up similarly in SAMS
 		{
 			// TODO this search routine is done more than once, rewrite as function
@@ -797,79 +645,76 @@ void CAL_CONV gfexfo_
 				}
 			}
 		}
+		// TODO check that the hydrostatic properties are {} empty in the .structure.txt file
 	};
 
-	/*fclose(SAMS_result_file);
-	SAMS_result_file = fopen(SAMS_resultfile_path, "r");
-	int line_counter = 0;
-	while (true)
+	// Read ice forces from the SAMS result .txt file
 	{
-		int line_length = getline(&line_buffer, &line_buffer_size, SAMS_result_file);
-		if (line_length < 0)
-			break;
-		line_counter++;
+		if (getline(&line_buffer, &line_buffer_size, SAMS_result_file) < 0)
+		{
+			printf("Error getting line from SAMS result file\n");
+			*ierr = -18;
+			return;
+		}
+		int current_index = 0;
+		int offset = 0;
+		// The text output file of (this version of) SAMS has 47 columns, 29th of which is the last ice force component
+		for (int i = 0;i < 29;i++)
+		{
+			if (sscanf(line_buffer + current_index, " %lf %n", &SAMS_txt_output[i], &offset) != 1)
+			{
+				// TODO show the actual file paths in these messages
+				printf("Error parsing column %d from SAMS result file\n", i);
+				*ierr = -19;
+				return;
+			}
+			current_index += offset;
+		}
+		// Rename some SAMS text output values for clarity
+		double SAMS_txt_time = SAMS_txt_output[0];
+		// Float precision error should be at least one magnitude smaller than time mismatch
+		if (SAMS_txt_time - time >= dt/10)
+		{
+			printf("Time mismatch: SIMA %f, SAMS log %f\n", time, SAMS_txt_time);
+			*ierr = -20;
+			return;
+		}
+		// Collect ice forces
+		for (int i = 0;i < 3;i++)
+		{
+			// Linear forces are composed of breaking and rubble forces
+			F_ice_global[i] = SAMS_txt_output[20 + i] + SAMS_txt_output[23 + i];
+			// Rotational forces are given as total torque in global frame
+			F_ice_global[3 + i] = SAMS_txt_output[26 + i];
+		}
 	}
-	printf("Step %d: %d lines read\n", step_nr, line_counter);
-	printf("Last line: %s\n",line_buffer);*/
 
-	//int lines_to_read;
-	//if (step_nr < 3) // Headers not written yet, avoid EOF error
-	//	lines_to_read = 0;
-	//else if (step_nr == 3) // Headers written , catch up
-	//	lines_to_read = 7;
-	//else // Keep catching up
-	//	lines_to_read = 1;
-	//for (int i = 0;i < lines_to_read;i++)
-	//{
-	//	if (SAMS_result_file == NULL)
-	//	{
-	//		printf("Timestep %d: Error: SAMS result file handle is NULL\n",step_nr);
-	//		*ierr = -17;
-	//		return;
-	//	}
-	//	int line_length = getline(&line_buffer, &line_buffer_size, SAMS_result_file);
-	//	
-	//	if (line_length < 0)
-	//	{
-	//		printf("Timestep %d: Error getting line %d from SAMS result file\n",step_nr,i);
-	//		*ierr = -18;
-	//		return;
-	//	}
-	//	printf("Step %d, line %d: %s\n", step_nr, i, line_buffer);
-	//}
-	//if (lines_to_read)
-	//{
-	//	int current_index = 0;
-	//	int offset = 0;
+	// Save the ice forces to SIMA's memory for the next timestep
+	{
+		// Transform the ice forces from global coordinate system to SIMA local
+		for (int i = 0;i < 3;i++)
+		{
+			F_ice_SIMA_local[i] = 0; // [kN] surge, sway, heave
+			F_ice_SIMA_local[3 + i] = 0; // [MN*m] roll, pitch, yaw
+			for (int j = 0;j < 3;j++)
+			{
+				F_ice_SIMA_local[i] += rotation_matrix_SIMA[j][i] * F_ice_global[j] * pow(10, -3); // N -> kN
+				F_ice_SIMA_local[3 + i] += rotation_matrix_SIMA[j][i] * F_ice_global[3 + j] * pow(10, -6); // N*m -> MN*m
+			}
+			// Save ice forces to SIMA memory
+			stor[i] = F_ice_SIMA_local[i];
+			stor[3 + i] = F_ice_SIMA_local[3 + i];
+			stor[6 + i] = 0.; // "internal parameter", don't know what for
+		}
+	}
 
-	//	for (int i = 0;i < 47;i++) // 47 columns in the SAMS text output file
-	//	{
-	//		if (sscanf(line_buffer + current_index, " %lf %n", &SAMS_txt_output[i], &offset) != 1)
-	//		{
-	//			// TODO show the actual file paths in these messages
-	//			printf("Error parsing column %d from SAMS result file\n",i);
-	//			//*ierr = -19;
-	//			//return;
-	//		}
-	//		current_index += offset;
-	//	}
-	//	// Rename some SAMS text output values for clarity
-	//	double SAMS_txt_time = SAMS_txt_output[0];
-	//	if (SAMS_txt_time - time >= dt)
-	//	{
-	//		printf("Time mismatch: SIMA %f, SAMS log %f\n", time, SAMS_txt_time);
-	//		*ierr = -20;
-	//		return;
-	//	}
-	//	for (int i = 0;i < 3;i++)
-	//	{
-	//		// Linear forces are composed of breaking and rubble forces
-	//		SAMS_ice_force[i] = SAMS_txt_output[20 + i] + SAMS_txt_output[23 + i];
-	//		// Rotational forces are given as total
-	//		SAMS_ice_force[3 + i] = SAMS_txt_output[26 + i];
-	//	}
-	//}
-
+	// Calculate sea forces
+	for (int i = 0;i < 3;i++)
+	{
+		F_sea_global[i] = F_coupled_global[i] - F_ice_global[i] * pow(10, -3); // N -> kN
+		F_sea_global[3+i] = F_coupled_global[3+i] - F_ice_global[3+i] * pow(10, -6); // N*m -> MN*m
+	}
+		
 	// Last timestep, SAMS won't send anything. Close the connection and logs
 	if (step_nr == nr_of_steps && substep_nr == nr_of_substeps)
 	{
@@ -886,7 +731,7 @@ void CAL_CONV gfexfo_
 		return;
 	}
 
-	// Receive and process data from SAMS
+	// Receive data from SAMS
 	{
 		if (sams_tcp_socket == INVALID_SOCKET)
 		{
@@ -895,7 +740,7 @@ void CAL_CONV gfexfo_
 			return;
 		}
 		
-		iResult = receive_from_SAMS(sams_tcp_socket, &SAMS_time, displacement_SAMS, velocity_SAMS_t0, rotation_matrix_SAMS);
+		iResult = receive_from_SAMS(sams_tcp_socket, &SAMS_time, displacement_SAMS, rotation_matrix_SAMS);
 		if (iResult == 0) // This happens if SIMA simulates more timesteps than SAMS
 		{
 			printf("Warning: SAMS connection is closed\n");
@@ -907,23 +752,22 @@ void CAL_CONV gfexfo_
 			*ierr = -21;
 			return;
 		}
-		// Additional analysis on data received from SAMS, a bit redundant
-		for (int i = 0;i < 6;i++)
+	}
+
+	// Transform the sea forces from global coordinate system to SAMS local
+	for (int i = 0;i < 3;i++)
+	{
+		F_sea_SAMS_local[i] = 0;
+		F_sea_SAMS_local[3 + i] = 0;
+		for (int j = 0;j < 3;j++)
 		{
-			// Calculate accelerations as backward finite differences of velocity.
-			acceleration_SAMS[i] =
-				(
-					-velocity_SAMS_tm1[i]
-					+ velocity_SAMS_t0[i]
-					) / dt;
-			// Calculate inertial forces
-			inertial_force_SAMS[i] = acceleration_SAMS[i] * mass_matrix_SAMS[i][i];
-			// Calculate hydrostatic forces, see supervision presentation of 27.04.2022
-			hydrostatic_force_SAMS[i] = (stiffness_reference_SIMA[i] - displacement_SAMS[i]) * stiffness_matrix_SIMA[i][i];
+			F_sea_SAMS_local[i] += rotation_matrix_SAMS[j][i] * F_sea_global[j] * pow(10, 3); // kN -> N
+			F_sea_SAMS_local[3 + i] += rotation_matrix_SAMS[j][i] * F_sea_global[3 + j] * pow(10, 6); // MN*m -> N*m
 		}
 	}
-	// Send data to SAMS
-	if (send_to_SAMS(sams_tcp_socket, time, F_coupled_local) == SOCKET_ERROR)
+
+	// Send sea forces to SAMS
+	if (send_to_SAMS(sams_tcp_socket, time, F_sea_SAMS_local) == SOCKET_ERROR)
 	{
 		printf("Error sending TCP data to SAMS: %d\n", WSAGetLastError());
 		closesocket(sams_tcp_socket);
@@ -931,6 +775,180 @@ void CAL_CONV gfexfo_
 		*ierr = -22;
 		return;
 	}
+
+	// Set up the .csv file for logging
+	if (run_counter == 1)
+	{
+		// Column names
+		char* csv_ints_header[] =
+		{
+			"iwa",
+			"ipdms",
+			"IMODE",
+			"MODULE",
+			"IBDY",
+			"IBDTYP",
+			"NBDY",
+			"ISTEP",
+			"NSTEP",
+			"IEXTRA",
+			"NEXTRA",
+			"IGRAV",
+			"ISTORE",
+			"ITER",
+			"npcur",
+			"kxfo",
+			"ixfo",
+			"iextf",
+			"icoord",
+			"nint",
+			"nrea",
+			"nsto",
+			"nstr",
+		};
+		char* csv_floats_header[] =
+		{
+			"rwa",
+			"TIME",
+			"DT",
+			"GRAV",
+			"RHOW",
+			"RHOA",
+			"DEPTH",
+			"curcor",
+			"curvel",
+			"rxfo",
+			"rhxfo",
+			"stor_0",
+			"stor_1",
+			"stor_2",
+			"stor_3",
+			"stor_4",
+			"stor_5",
+			"stor_6",
+			"stor_7",
+			"stor_8"
+		};
+		char* csv_doubles_header[] =
+		{
+			"dwa",
+			"XGLB",
+			"YGLB",
+			"ZGLB",
+			"FI",
+			"THETA",
+			"PSI",
+			"velocity_SIMA_0",
+			"velocity_SIMA_1",
+			"velocity_SIMA_2",
+			"velocity_SIMA_3",
+			"velocity_SIMA_4",
+			"velocity_SIMA_5",
+			"acceleration_SIMA_0",
+			"acceleration_SIMA_1",
+			"acceleration_SIMA_2",
+			"acceleration_SIMA_3",
+			"acceleration_SIMA_4",
+			"acceleration_SIMA_5",
+			"inertial_force_SIMA_0",
+			"inertial_force_SIMA_1",
+			"inertial_force_SIMA_2",
+			"inertial_force_SIMA_3",
+			"inertial_force_SIMA_4",
+			"inertial_force_SIMA_5",
+			"hydrostatic_force_SIMA_0",
+			"hydrostatic_force_SIMA_1",
+			"hydrostatic_force_SIMA_2",
+			"hydrostatic_force_SIMA_3",
+			"hydrostatic_force_SIMA_4",
+			"hydrostatic_force_SIMA_5",
+			"SAMS_Time",
+			"displacement_SAMS_0",
+			"displacement_SAMS_1",
+			"displacement_SAMS_2",
+			"displacement_SAMS_3",
+			"displacement_SAMS_4",
+			"displacement_SAMS_5",
+			"acceleration_SAMS_0",
+			"acceleration_SAMS_1",
+			"acceleration_SAMS_2",
+			"acceleration_SAMS_3",
+			"acceleration_SAMS_4",
+			"acceleration_SAMS_5",
+			"inertial_force_SAMS_0",
+			"inertial_force_SAMS_1",
+			"inertial_force_SAMS_2",
+			"inertial_force_SAMS_3",
+			"inertial_force_SAMS_4",
+			"inertial_force_SAMS_5",
+			"hydrostatic_force_SAMS_0",
+			"hydrostatic_force_SAMS_1",
+			"hydrostatic_force_SAMS_2",
+			"hydrostatic_force_SAMS_3",
+			"hydrostatic_force_SAMS_4",
+			"hydrostatic_force_SAMS_5",
+			"rotation_matrix_SIMA_0_0",
+			"rotation_matrix_SIMA_0_1",
+			"rotation_matrix_SIMA_0_2",
+			"rotation_matrix_SIMA_1_0",
+			"rotation_matrix_SIMA_1_1",
+			"rotation_matrix_SIMA_1_2",
+			"rotation_matrix_SIMA_2_0",
+			"rotation_matrix_SIMA_2_1",
+			"rotation_matrix_SIMA_2_2",
+			"gamma_0",
+			"gamma_1",
+			"gamma_2",
+			"gamma_3",
+			"rotation_matrix_SAMS_0_0",
+			"rotation_matrix_SAMS_0_1",
+			"rotation_matrix_SAMS_0_2",
+			"rotation_matrix_SAMS_1_0",
+			"rotation_matrix_SAMS_1_1",
+			"rotation_matrix_SAMS_1_2",
+			"rotation_matrix_SAMS_2_0",
+			"rotation_matrix_SAMS_2_1",
+			"rotation_matrix_SAMS_2_2",
+			"SAMS_ice_force_0",
+			"SAMS_ice_force_1",
+			"SAMS_ice_force_2",
+			"SAMS_ice_force_3",
+			"SAMS_ice_force_4",
+			"SAMS_ice_force_5",
+		};
+		nr_of_csv_ints = (int)sizeof(csv_ints_header) / sizeof(csv_ints_header[0]);
+		nr_of_csv_floats = (int)sizeof(csv_floats_header) / sizeof(csv_floats_header[0]);
+		nr_of_csv_doubles = (int)sizeof(csv_doubles_header) / sizeof(csv_doubles_header[0]);
+		// Write the log headers
+		csv_writer = CsvWriter_new(gfexfo_result_file_name, ";", 0);
+		for (int i = 0; i < nr_of_csv_ints; i++)
+		{
+			if (CsvWriter_writeField(csv_writer, csv_ints_header[i]))
+			{
+				printf("Error writing .csv file: %s\n", CsvWriter_getErrorMessage(csv_writer));
+				*ierr = -4;
+				return;
+			}
+		}
+		for (int i = 0; i < nr_of_csv_floats; i++)
+		{
+			if (CsvWriter_writeField(csv_writer, csv_floats_header[i]))
+			{
+				printf("Error writing to .csv file: %s\n", CsvWriter_getErrorMessage(csv_writer));
+				*ierr = -5;
+				return;
+			}
+		}
+		for (int i = 0; i < nr_of_csv_doubles; i++)
+			{
+				if (CsvWriter_writeField(csv_writer, csv_doubles_header[i]))
+				{
+					printf("Error writing .csv file: %s\n", CsvWriter_getErrorMessage(csv_writer));
+					*ierr = -6;
+					return;
+				}
+			}
+	};
 
 	// Log the variables for this timestep
 	{
@@ -1063,12 +1081,12 @@ void CAL_CONV gfexfo_
 			rotation_matrix_SAMS[2][0],
 			rotation_matrix_SAMS[2][1],
 			rotation_matrix_SAMS[2][2],
-			SAMS_ice_force[0],
-			SAMS_ice_force[1],
-			SAMS_ice_force[2],
-			SAMS_ice_force[3],
-			SAMS_ice_force[4],
-			SAMS_ice_force[5]
+			F_ice_global[0],
+			F_ice_global[1],
+			F_ice_global[2],
+			F_ice_global[3],
+			F_ice_global[4],
+			F_ice_global[5]
 		};
 		CsvWriter_nextRow(csv_writer);
 		char log_buffer[50];
@@ -1189,7 +1207,7 @@ int send_to_SAMS(SOCKET sams_tcp_socket, double time, double central_forces[6])
 	return send(sams_tcp_socket, GFEXFO_to_SAMS.character_array, sizeof(GFEXFO_to_SAMS.double_precision), 0);
 }
 
-int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_time, double displacement_SAMS[6], double velocity_SAMS_t0[6], double rotation_matrix_SAMS[3][3])
+int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_time, double displacement_SAMS[6], double rotation_matrix_SAMS[3][3])
 {
 	// Decode a bytestring from SAMS into doubles
 	union
@@ -1206,6 +1224,13 @@ int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_time, double displace
 	double e1 = SAMS_to_GFEXFO.double_precision[4];
 	double e2 = SAMS_to_GFEXFO.double_precision[5];
 	double e3 = SAMS_to_GFEXFO.double_precision[6];
+	for (int i = 0;i < 3;i++)
+		displacement_SAMS[i] = SAMS_to_GFEXFO.double_precision[1 + i]; // Global coordinates
+	// Z in SAMS is positive towards the ground, convert here to Z pointing skyward as in SIMA
+	e2 = -e2;
+	e3 = -e3;
+	displacement_SAMS[1] = -displacement_SAMS[1];
+	displacement_SAMS[2] = -displacement_SAMS[2];
 	double theta_aa = SAMS_to_GFEXFO.double_precision[7]; // Theta in axis-angle representation
 	// Calculations based on data received from SAMS
 	rotation_matrix_SAMS[0][0] = (1 - cos(theta_aa)) * e1 * e1 + cos(theta_aa);
@@ -1226,9 +1251,6 @@ int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_time, double displace
 	displacement_SAMS[3] = phi;
 	displacement_SAMS[4] = theta_zyx;
 	displacement_SAMS[5] = psi;
-	for (int i = 0;i < 3;i++)
-		displacement_SAMS[i] = SAMS_to_GFEXFO.double_precision[1 + i];
-	for (int i = 0;i < 6;i++)
-		velocity_SAMS_t0[i] = SAMS_to_GFEXFO.double_precision[8 + i];
+	
 	return iResult;
 }
