@@ -22,13 +22,13 @@ ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
 
     c = getc(stream);
     if (c == EOF) {
-        return -1;
+        return -2;
     }
 
     if (*lineptr == NULL) {
         *lineptr = malloc(128);
         if (*lineptr == NULL) {
-            return -1;
+            return -3;
         }
         *n = 128;
     }
@@ -42,7 +42,7 @@ ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
             }
             char *new_ptr = realloc(*lineptr, new_size);
             if (new_ptr == NULL) {
-                return -1;
+                return -4;
             }
             *n = new_size;
             *lineptr = new_ptr;

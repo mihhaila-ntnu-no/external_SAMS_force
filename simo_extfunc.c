@@ -43,12 +43,15 @@ void CAL_CONV gfexfo_
 	// The error values decrease sequentially as they appear in the code, but this hasn't shown up in SIMA so far
 	*ierr = 0;
 
+	// TODO try simulating with more than 1 substep, is dt referring to the length of one step or substep?
 	// Function argument aliases
 	int body_nr = iinfo[2]-1; // bodies are indexed starting with 1
 	int step_nr = iinfo[5];
 	int nr_of_steps = iinfo[6];
 	int substep_nr = iinfo[7];
 	int nr_of_substeps = iinfo[8];
+	int substep_nr_overall = substep_nr + (step_nr - 1) * nr_of_substeps;
+	int nr_of_substeps_overall = nr_of_steps * nr_of_substeps;
 	float time = rinfo[0];
 	float dt = rinfo[1];
 	
@@ -95,7 +98,7 @@ void CAL_CONV gfexfo_
 	static double mass_matrix_SIMA[6][6]; // [kg*10^3, kg*m^2*10^3]
 	static double mass_matrix_SAMS[6][6]; // [kg]
 	static char SAMS_resultfile_path[MCHEXT];
-	static FILE* SAMS_result_file;
+	
 	static double F_ice_SIMA_local[6];
 	//  Hydrostatic restoring force is modeled as spring stiffness
 	static double stiffness_matrix_SIMA[6][6]; // [kN/m, kN*m]
@@ -126,7 +129,6 @@ void CAL_CONV gfexfo_
 	double hydrostatic_force_SAMS[6]; // [N]
 	double rotation_matrix_SIMA[3][3]; // From global to local
 	double rotation_matrix_SAMS[3][3]; // So X_global = matrix x X_local
-	double SAMS_txt_output[47];
 	double F_ice_global[6];
 	double F_sea_global[6]; // Sea forces on structure, as opposed to ice forces
 	double F_sea_SAMS_local[6];
@@ -140,6 +142,7 @@ void CAL_CONV gfexfo_
 	int nr_of_csv_floats;
 	int nr_of_csv_doubles;
 	char* gfexfo_result_file_name = "gfexfo_sams.csv";
+	char* system_description_filename;
 	
 	// Initialize SIMA-related information
 	if (run_counter == 1)
@@ -153,19 +156,21 @@ void CAL_CONV gfexfo_
 		// Read the M and K matrices from sys.dat
 		{
 			FILE* sys_dat_file;
-			char* sys_dat_filename = "sys-sima.dat";
-			sys_dat_file = fopen(sys_dat_filename, "r");
+			system_description_filename = "sys-sima.dat"; // First assumption: this function was called by RIFLEX
+			sys_dat_file = fopen(system_description_filename, "r");
 			if (!sys_dat_file)
 			{
-				sys_dat_filename = "sys.dat";
-				sys_dat_file = fopen(sys_dat_filename, "r");
-				if (!sys_dat_file)
-				{
-					printf("Could not open either sys.dat or sys-sima.dat\n");
-					*ierr = -7;
-					return;
-				}
+				system_description_filename = "sys.dat"; // Second assumption: this function was called by SIMO
+				sys_dat_file = fopen(system_description_filename, "r");
 			}
+			if (!sys_dat_file) // This function was called by neither RIFLEX nor SIMO
+			{
+				printf("Could not find system description file.\n");
+				printf("A RIFLEX task should name it sys-sima.dat; a SIMO task should name it sys.dat\n");
+				*ierr = -7;
+				return;
+			}
+			
 			while (getline(&line_buffer, &line_buffer_size, sys_dat_file) >= 0)
 			{
 				if (strcmp(line_buffer, " MASS COEFFICIENTS\n") == 0)
@@ -206,7 +211,7 @@ void CAL_CONV gfexfo_
 
 			int line_length = getline(&line_buffer, &line_buffer_size, sys_dat_file);
 			if (line_length < 98 || line_length > 104)
-				printf("Warning reading stiffness reference from %s: unexpected line length\n", sys_dat_filename);
+				printf("Warning reading stiffness reference from %s: unexpected line length\n", system_description_filename);
 			iResult = sscanf
 			(
 				line_buffer,
@@ -369,6 +374,14 @@ void CAL_CONV gfexfo_
 			*ierr = -27;
 			return;
 		}
+		if (strcmp(system_description_filename, "sys-sima.dat") == 0)
+		{
+			//printf("This function was called by RIFLEX\n");
+		}
+		else if (strcmp(system_description_filename, "sys.dat") == 0)
+		{
+			//printf("This function was called by SIMO\n");
+		}
 		// The initial timestep i=0 happened without calling gfexfo_(), nothing was logged from that timestep
 		// Similarly, the initial timestep i=0 is received from SAMS, but nothing is done with it
 		// Instead, it will be shortly overwritten by the information of i=1
@@ -506,31 +519,6 @@ void CAL_CONV gfexfo_
 			} while (FindNextFile(found_handle, &found_data)); // Find the next file.
 			FindClose(found_handle); // Always, Always, clean things up!
 			sprintf(SAMS_resultfile_path, "%s%s", SAMS_resultfolder_path, SAMS_latest_result);
-			printf("Reading SAMS result file: %s\n", SAMS_resultfile_path);
-			SAMS_result_file = fopen(SAMS_resultfile_path, "r");
-			if (!SAMS_result_file)
-			{
-				printf("Error opening SAMS result file\n");
-				*ierr = -2;
-				return;
-			}
-			if (SAMS_result_file == NULL)
-			{
-				printf("Timestep %d: Error: SAMS result file handle is NULL\n", step_nr);
-				*ierr = -3;
-				return;
-			}
-			// At this point, 8 non-zero lines should exist in the result file, the last of them i=1
-			for (int i = 0;i < 7;i++)
-				if (getline(&line_buffer, &line_buffer_size, SAMS_result_file) < 0)
-				{
-					// Something weird is happening here.
-					// For no obvious reason, this line read fails on some simulations and then succeeds after an unrelated change and recompile
-					// If it happens again, read getline.c and figure out what exactly is going wrong
-					printf("Error %d getting header line %d from SAMS result file\n", errno, i);
-					*ierr = -18;
-					return;
-				}
 		};
 
 		// Check that the simulation is set up similarly in SAMS
@@ -563,6 +551,8 @@ void CAL_CONV gfexfo_
 				return;
 			}
 			// TODO also check that the frequency is the same, in .itconfig it is given as f=1/dt
+			// Here, dt should be the length on one substep, not step.
+			// Otherwise, SAMS would be called only on the first substep of every step
 			fclose(itconfig_file);
 		};
 		double radius_of_gyration_SAMS[3];
@@ -650,42 +640,18 @@ void CAL_CONV gfexfo_
 
 	// Read ice forces from the SAMS result .txt file
 	{
-		if (getline(&line_buffer, &line_buffer_size, SAMS_result_file) < 0)
+		double SAMS_txt_time;
+		iResult = read_from_SAMS(SAMS_resultfile_path, substep_nr_overall, nr_of_substeps_overall, &SAMS_txt_time, F_ice_global);
+		if (iResult < 0)
 		{
-			printf("Error getting line from SAMS result file\n");
-			*ierr = -18;
+			*ierr = iResult;
 			return;
 		}
-		int current_index = 0;
-		int offset = 0;
-		// The text output file of (this version of) SAMS has 47 columns, 29th of which is the last ice force component
-		for (int i = 0;i < 29;i++)
-		{
-			if (sscanf(line_buffer + current_index, " %lf %n", &SAMS_txt_output[i], &offset) != 1)
-			{
-				// TODO show the actual file paths in these messages
-				printf("Error parsing column %d from SAMS result file\n", i);
-				*ierr = -19;
-				return;
-			}
-			current_index += offset;
-		}
-		// Rename some SAMS text output values for clarity
-		double SAMS_txt_time = SAMS_txt_output[0];
-		// Float precision error should be at least one magnitude smaller than time mismatch
 		if (SAMS_txt_time - time >= dt/10)
 		{
 			printf("Time mismatch: SIMA %f, SAMS log %f\n", time, SAMS_txt_time);
 			*ierr = -20;
 			return;
-		}
-		// Collect ice forces
-		for (int i = 0;i < 3;i++)
-		{
-			// Linear forces are composed of breaking and rubble forces
-			F_ice_global[i] = SAMS_txt_output[20 + i] + SAMS_txt_output[23 + i];
-			// Rotational forces are given as total torque in global frame
-			F_ice_global[3 + i] = SAMS_txt_output[26 + i];
 		}
 	}
 
@@ -716,7 +682,7 @@ void CAL_CONV gfexfo_
 	}
 		
 	// Last timestep, SAMS won't send anything. Close the connection and logs
-	if (step_nr == nr_of_steps && substep_nr == nr_of_substeps)
+	if (substep_nr_overall == nr_of_substeps_overall)
 	{
 		iResult = WSACleanup();
 		if (iResult == SOCKET_ERROR)
@@ -727,7 +693,6 @@ void CAL_CONV gfexfo_
 		}
 		CsvWriter_destroy(csv_writer);
 		printf("Disconnected from SAMS, results saved in %s\n", gfexfo_result_file_name);
-		fclose(SAMS_result_file); // TODO clean up this file also in case of ungraceful exit
 		return;
 	}
 
@@ -1253,4 +1218,101 @@ int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_time, double displace
 	displacement_SAMS[5] = psi;
 	
 	return iResult;
+}
+
+int read_from_SAMS(char* SAMS_resultfile_path, int substep_nr_overall, int nr_of_substeps_overall, double* SAMS_txt_time, double F_ice_global[6])
+{
+	int* ierr = 0;
+	int iResult = 0;
+	char* line_buffer = NULL; // for getline()
+	size_t line_buffer_size = 0; // for getline()
+	double SAMS_txt_output[49]; // The last, 49th, column in the .txt file is CalculationTimeRatio [s]
+	int header_lines = 7; // The 1st timestep is described by the 8th line in the file
+	int lines_to_read = 1;
+	static FILE* SAMS_result_file;
+	if (substep_nr_overall == 1)
+	{
+		lines_to_read += header_lines;
+		printf("Reading SAMS result file: %s\n", SAMS_resultfile_path);
+		SAMS_result_file = fopen(SAMS_resultfile_path, "r");
+		if (!SAMS_result_file)
+		{
+			printf("Error opening %s\n",SAMS_resultfile_path);
+			*ierr = -2;
+			return *ierr;
+		}
+	}
+	int max_wait_ms = 1000;
+	bool starting_over;
+	for (int j = 1;j <= max_wait_ms;j *= 10)
+	{
+		for (int i = 0;i < lines_to_read;i++)
+		{
+			// TODO handle getline errors everywhere, not just here
+			// The fact that a line read failure happens in the middle of the simulation suggests a race condition
+			// More investigation is needed, but a possible workaround is to just wait increasing amounts of time
+			starting_over = false;
+			switch (getline(&line_buffer, &line_buffer_size, SAMS_result_file))
+			{
+			case 0:
+				printf("Empty line i=%d from SAMS result file at sub-timestep %d\n", i, substep_nr_overall);
+			case -1:
+				printf("Error %d getting line i=%d from SAMS result file at sub-timestep %d: %s\n", errno, i, substep_nr_overall, strerror(errno));
+				*ierr = -18;
+				return *ierr;
+			case -2:
+				printf("EOF at start of line i=%d from SAMS result file at sub-timestep %d\n", i, substep_nr_overall);
+				printf("Waiting %.3f seconds and starting over\n", j / 1000.);
+				starting_over = true;
+				Sleep(j);
+				i = 0;
+				lines_to_read = header_lines + substep_nr_overall;
+				fseek(SAMS_result_file, 0, SEEK_SET);
+				line_buffer = NULL;
+				line_buffer_size = 0;
+			case -3:
+				printf("Line pointer memory allocation failure while getting line i=%d from SAMS result file at sub-timestep %d\n", i, substep_nr_overall);
+				*ierr = -31;
+				return *ierr;
+			case -4:
+				printf("Line pointer memory reallocation failure while getting line i=%d from SAMS result file at sub-timestep %d\n", i, substep_nr_overall);
+				*ierr = -32;
+				return *ierr;
+			}
+		}
+		if (!starting_over)
+			break;
+	}
+	if (starting_over)
+	{
+		printf("Timed out (%.3f s) while waiting for last row of %s", max_wait_ms / 1000., SAMS_resultfile_path);
+		*ierr = -33;
+		return *ierr;
+	}
+	int current_index = 0;
+	int offset = 0;
+	// The 29th column is the last ice force component, Ice_Torque_Z_Tot [N.m]
+	for (int i = 0;i < 29;i++)
+	{
+		if (sscanf(line_buffer + current_index, " %lf %n", &SAMS_txt_output[i], &offset) != 1)
+		{
+			printf("Error parsing column %d from SAMS result file\n", i);
+			*ierr = -19;
+			return *ierr;
+		}
+		current_index += offset;
+	}
+	// Collect ice forces
+	for (int i = 0;i < 3;i++)
+	{
+		// Linear forces are composed of breaking and rubble forces
+		F_ice_global[i] = SAMS_txt_output[20 + i] + SAMS_txt_output[23 + i];
+		// Rotational forces are given as total torque in global frame
+		F_ice_global[3 + i] = SAMS_txt_output[26 + i];
+	}
+	return iResult; // 0 if success, negative error code in case of failure
+	if (substep_nr_overall == nr_of_substeps_overall)
+	{
+		fclose(SAMS_result_file); // TODO clean up this file also in case of ungraceful exit
+	}
 }
