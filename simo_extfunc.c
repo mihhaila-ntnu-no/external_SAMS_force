@@ -1256,6 +1256,7 @@ int read_from_SAMS(char* SAMS_resultfile_path, int substep_nr_overall, int nr_of
 			{
 			case 0:
 				printf("Empty line i=%d from SAMS result file at sub-timestep %d\n", i, substep_nr_overall);
+				break;
 			case -1:
 				printf("Error %d getting line i=%d from SAMS result file at sub-timestep %d: %s\n", errno, i, substep_nr_overall, strerror(errno));
 				*ierr = -18;
@@ -1270,6 +1271,7 @@ int read_from_SAMS(char* SAMS_resultfile_path, int substep_nr_overall, int nr_of
 				fseek(SAMS_result_file, 0, SEEK_SET);
 				line_buffer = NULL;
 				line_buffer_size = 0;
+				break;
 			case -3:
 				printf("Line pointer memory allocation failure while getting line i=%d from SAMS result file at sub-timestep %d\n", i, substep_nr_overall);
 				*ierr = -31;
