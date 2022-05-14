@@ -442,7 +442,7 @@ void CAL_CONV gfexfo_
 			int SAMS_result_month;
 			int SAMS_result_day;
 			int SAMS_result_time;
-			char SAMS_latest_result[MCHEXT];
+			char SAMS_resultfile_name_latest[MCHEXT];
 			bool newer_result_found;
 			// These string parameters are defined in the "External DLL force" dialog in SIMA
 			strncpy(itconfig_file_path, chext[0] + 1, MCHEXT - 1);
@@ -514,11 +514,11 @@ void CAL_CONV gfexfo_
 					latest_month = SAMS_result_month;
 					latest_day = SAMS_result_day;
 					latest_time = SAMS_result_time;
-					strcpy(SAMS_latest_result, found_data.cFileName);
+					strcpy(SAMS_resultfile_name_latest, found_data.cFileName);
 				}
 			} while (FindNextFile(found_handle, &found_data)); // Find the next file.
 			FindClose(found_handle); // Always, Always, clean things up!
-			sprintf(SAMS_resultfile_path, "%s%s", SAMS_resultfolder_path, SAMS_latest_result);
+			sprintf(SAMS_resultfile_path, "%s%s", SAMS_resultfolder_path, SAMS_resultfile_name_latest);
 		};
 
 		// Check that the simulation is set up similarly in SAMS
@@ -647,7 +647,7 @@ void CAL_CONV gfexfo_
 			*ierr = iResult;
 			return;
 		}
-		if (SAMS_txt_time - time >= dt/10)
+		if ((SAMS_txt_time - time) >= dt/10)
 		{
 			printf("Time mismatch: SIMA %f, SAMS log %f\n", time, SAMS_txt_time);
 			*ierr = -20;
@@ -1304,7 +1304,8 @@ int read_from_SAMS(char* SAMS_resultfile_path, int substep_nr_overall, int nr_of
 		}
 		current_index += offset;
 	}
-	// Collect ice forces
+	// Collect time and ice forces
+	*SAMS_txt_time = SAMS_txt_output[0];
 	for (int i = 0;i < 3;i++)
 	{
 		// Linear forces are composed of breaking and rubble forces
