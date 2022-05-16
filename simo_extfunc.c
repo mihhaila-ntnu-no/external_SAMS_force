@@ -95,16 +95,16 @@ void CAL_CONV gfexfo_
 	static CsvWriter* csv_writer;
 	static double displacement_SIMA_tm1[6]; // Timestep t = -1.
 	static double displacement_SIMA_tm2[6]; // Timestep t = -2
-	static double velocity_SAMS_tm1[6]; // Timestep t = -1
 	static double mass_matrix_SIMA[6][6]; // [kg*10^3, kg*m^2*10^3]
 	static double mass_matrix_SAMS[6][6]; // [kg]
 	static char SAMS_resultfile_path[MCHEXT];
-	
+	static int nr_of_csv_ints; // For logging
+	static int nr_of_csv_floats;
+	static int nr_of_csv_doubles;
 	static bool called_by_RIFLEX = true; // First assumption
 	static bool called_by_SIMO = false;
-	
 	static double F_ice_SIMA_local[6];
-	//  Hydrostatic restoring force is modeled as spring stiffness
+	// Hydrostatic restoring force is modeled as spring stiffness
 	static double stiffness_matrix_SIMA[6][6]; // [kN/m, kN*m]
 	static double stiffness_reference_SIMA[6]; // [m, rad] Hydrostatic equilibrium position
 
@@ -123,7 +123,6 @@ void CAL_CONV gfexfo_
 
 	// Working variables
 	double velocity_SIMA_t0[6];
-	double velocity_SAMS_t0[6];
 	double acceleration_SIMA[6];
 	double displacement_SAMS[6];
 	double acceleration_SAMS[6];
@@ -145,13 +144,11 @@ void CAL_CONV gfexfo_
 	int iResult; // For error codes
 	char* line_buffer = NULL; // for getline()
 	size_t line_buffer_size = 0; // for getline()
-	int nr_of_csv_ints; // For logging
-	int nr_of_csv_floats;
-	int nr_of_csv_doubles;
+
 	char* gfexfo_result_file_name = "gfexfo_sams.csv";
 	char itconfig_file_path[MCHEXT]; // Also used to get the SAMS simulation name
 	
-	// Gather information from SAMS and SIMA about the simulation setup
+	// Simulation setup. Read and assume information.
 	if (run_counter == 1)
 	{
 		// Back-initialize the SIMA displacements to avoid calculating an unphysical initial jerk
@@ -160,7 +157,7 @@ void CAL_CONV gfexfo_
 			displacement_SIMA_tm1[i] = displacement_SIMA_t0.double_precision[i];
 			displacement_SIMA_tm2[i] = displacement_SIMA_t0.double_precision[i];
 		}
-		// Read the M and K matrices from sys.dat
+		// Read the M and K matrices from sys.dat, find out which SIMA module is calling this function
 		{
 			FILE* sys_dat_file;
 			char* system_description_filename = "sys-sima.dat";
@@ -292,6 +289,7 @@ void CAL_CONV gfexfo_
 			*ierr = -12;
 			return;
 		}
+		// TODO check that the simulation time >= 19 s. Shorter simulations seem to cause SAMS to expect an extra TCP message at the end
 		if (SAMS_maxSimulationTime != nr_of_steps * dt)
 		{
 			printf("Error: Different simulation times declared in SAMS and SIMA.\n");
@@ -360,6 +358,7 @@ void CAL_CONV gfexfo_
 		for (int i = 0;i < 3;i++)
 			mass_matrix_SAMS[3 + i][3 + i] = pow(radius_of_gyration_SAMS[i], 2) * mass_matrix_SAMS[i][i];
 		// Check the mass matrix for disrepancies between SAMS and SIMA
+		// TODO add units to the warning text
 		double mass_matrix_relative_difference[6][6];
 		for (int i = 0;i < 6;i++)
 		{
@@ -495,6 +494,11 @@ void CAL_CONV gfexfo_
 			FindClose(found_handle); // Always, Always, clean things up!
 			sprintf(SAMS_resultfile_path, "%s%s", SAMS_resultfolder_path, SAMS_resultfile_name_latest);
 		}
+
+		// Assume zero ice forces for the first timestep
+		for (int i = 0;i < 6;i++)
+			F_ice_global[i] = 0;
+
 	};
 
 	// Calculate kinematic state, state-dependent forces, global->body transformation matrix
@@ -610,84 +614,6 @@ void CAL_CONV gfexfo_
 		}
 	};
 
-	// Catch-up exchange with SAMS
-	if (called_by_RIFLEX && (substep_nr_overall == 1))
-	{
-		// The initial timestep i=0 happened without calling gfexfo_(), nothing was logged from that timestep
-		// Similarly, the initial timestep i=0 is received from SAMS, but nothing is done with it
-		// Instead, it will be shortly overwritten by the information of i=1
-		iResult = receive_from_SAMS(sams_tcp_socket, &SAMS_TCP_time, displacement_SAMS, rotation_matrix_SAMS);
-		if (iResult == 0) // This happens if SIMA simulates more timesteps than SAMS
-		{
-			printf("Warning: SAMS connection is closed\n");
-			(*ierr)++;
-		}
-		else if (iResult < 0)
-		{
-			printf("Receive failed from SAMS: %d\n", WSAGetLastError());
-			*ierr = -29;
-			return;
-		}
-		// On the first timestep, ice forces are absent.
-		// The state-dependent forces Mx''+Kx are equal to the sea forces. F_coupled = F_sea
-		// Transform the sea forces from global coordinate system to SAMS local
-		for (int i = 0;i < 3;i++)
-		{
-			F_sea_SAMS_local[i] = 0;
-			F_sea_SAMS_local[3 + i] = 0;
-			for (int j = 0;j < 3;j++)
-			{
-				F_sea_SAMS_local[i] += rotation_matrix_SAMS[j][i] * F_coupled_global[j] * pow(10, 3); // kN -> N
-				F_sea_SAMS_local[3 + i] += rotation_matrix_SAMS[j][i] * F_coupled_global[3 + j] * pow(10, 6); // MN*m -> N*m
-			}
-		}
-		if (send_to_SAMS(sams_tcp_socket, 0.0, F_sea_SAMS_local) == SOCKET_ERROR)
-		{
-			printf("Error sending TCP data to SAMS: %d\n", WSAGetLastError());
-			closesocket(sams_tcp_socket);
-			WSACleanup();
-			*ierr = -28;
-			return;
-		}
-	};
-
-	// Read ice forces from the SAMS result .txt file
-	if (called_by_RIFLEX || (substep_nr_overall > 1))
-	{
-		// For SIMO simulations, the i=0, t=0.0 line will not be written. Skip reading it
-		iResult = read_from_SAMS(SAMS_resultfile_path, substep_nr_overall, nr_of_substeps_overall, &SAMS_txt_time, F_ice_global, called_by_SIMO);
-		if (iResult < 0)
-		{
-			*ierr = iResult;
-			return;
-		}
-		if ((SAMS_txt_time - time) >= dt/10)
-		{
-			printf("Time mismatch: SIMA %f, SAMS log %f\n", time, SAMS_txt_time);
-			*ierr = -20;
-			return;
-		}
-	}
-
-	// Save the ice forces to SIMA's memory for the next timestep
-	{
-		// Transform the ice forces from global coordinate system to SIMA local
-		for (int i = 0;i < 3;i++)
-		{
-			F_ice_SIMA_local[i] = 0; // [kN] surge, sway, heave
-			F_ice_SIMA_local[3 + i] = 0; // [MN*m] roll, pitch, yaw
-			for (int j = 0;j < 3;j++)
-			{
-				F_ice_SIMA_local[i] += rotation_matrix_SIMA[j][i] * F_ice_global[j] * pow(10, -3); // N -> kN
-				F_ice_SIMA_local[3 + i] += rotation_matrix_SIMA[j][i] * F_ice_global[3 + j] * pow(10, -6); // N*m -> MN*m
-			}
-			// Save ice forces to SIMA memory
-			stor[i] = F_ice_SIMA_local[i];
-			stor[3 + i] = F_ice_SIMA_local[3 + i];
-			stor[6 + i] = 0.; // "internal parameter", don't know what for
-		}
-	}
-
 	// Calculate sea forces
 	for (int i = 0;i < 3;i++)
 	{
@@ -697,7 +623,6 @@ void CAL_CONV gfexfo_
 	
 	// Receive TCP data from SAMS
 	{
-		// TODO don't try if it's the last timestep of a RIFLEX simulation
 		if (sams_tcp_socket == INVALID_SOCKET)
 		{
 			printf("Invalid SAMS TCP socket\n");
@@ -716,12 +641,13 @@ void CAL_CONV gfexfo_
 			*ierr = -21;
 			return;
 		}
-		if ((SAMS_TCP_time - time) >= dt / 10)
+		if ((SAMS_TCP_time - timestep_start_time) >= dt / 10)
 		{
-			printf("Time mismatch: SIMA %f, SAMS TCP %f\n", time, SAMS_txt_time);
+			printf("Timestep start time mismatch: SIMA %f, SAMS TCP %f\n", timestep_start_time, SAMS_TCP_time);
 			*ierr = -34;
 			return;
 		}
+		// TODO express the difference between SAMS and SIMA rotation matrices, define a maximum value (1%?)
 	}
 
 	// Transform the sea forces from global coordinate system to SAMS local
@@ -729,11 +655,57 @@ void CAL_CONV gfexfo_
 	{
 		F_sea_SAMS_local[i] = 0;
 		F_sea_SAMS_local[3 + i] = 0;
+		// Send zero forces until rhythm and coordinate transform are sorted
+		//for (int j = 0;j < 3;j++)
+		//{
+		//	F_sea_SAMS_local[i] += rotation_matrix_SAMS[j][i] * F_sea_global[j] * pow(10, 3); // kN -> N
+		//	F_sea_SAMS_local[3 + i] += rotation_matrix_SAMS[j][i] * F_sea_global[3 + j] * pow(10, 6); // MN*m -> N*m
+		//}
+	}
+
+	// Send sea forces to SAMS
+	if (send_to_SAMS(sams_tcp_socket, timestep_start_time, F_sea_SAMS_local) == SOCKET_ERROR)
+	{
+		printf("Error sending TCP data to SAMS: %d\n", WSAGetLastError());
+		closesocket(sams_tcp_socket);
+		WSACleanup();
+		*ierr = -22;
+		return;
+	}
+
+	// Read ice forces from the SAMS result .txt file
+	{
+		// For SIMO simulations, the i=0, t=0.0 line will not be written. Skip reading it
+		iResult = read_from_SAMS(SAMS_resultfile_path, substep_nr_overall, nr_of_substeps_overall, &SAMS_txt_time, F_ice_global);
+		if (iResult < 0)
+		{
+			*ierr = iResult;
+			return;
+		}
+		if ((SAMS_txt_time - timestep_end_time) >= dt / 10)
+		{
+			printf("Timestep end time mismatch: SIMA %f, SAMS log %f\n", timestep_end_time, SAMS_txt_time);
+			*ierr = -20;
+			return;
+		}
+	}
+
+	// Save the ice forces to SIMA's memory for the next timestep
+	for (int i = 0;i < 3;i++)
+	{
+		// F_ice_SIMA_local holds the values from the previous timestep
+		F_ice_SIMA_local[i] = 0; // [kN] surge, sway, heave
+		F_ice_SIMA_local[3 + i] = 0; // [MN*m] roll, pitch, yaw
+		// Transform the ice forces from global coordinate system to SIMA local
 		for (int j = 0;j < 3;j++)
 		{
-			F_sea_SAMS_local[i] += rotation_matrix_SAMS[j][i] * F_sea_global[j] * pow(10, 3); // kN -> N
-			F_sea_SAMS_local[3 + i] += rotation_matrix_SAMS[j][i] * F_sea_global[3 + j] * pow(10, 6); // MN*m -> N*m
+			F_ice_SIMA_local[i] += rotation_matrix_SIMA[j][i] * F_ice_global[j] * pow(10, -3); // N -> kN
+			F_ice_SIMA_local[3 + i] += rotation_matrix_SIMA[j][i] * F_ice_global[3 + j] * pow(10, -6); // N*m -> MN*m
 		}
+		// Save ice forces to SIMA memory
+		stor[i] = F_ice_SIMA_local[i];
+		stor[3 + i] = F_ice_SIMA_local[3 + i];
+		stor[6 + i] = 0.; // "internal parameter", don't know what for
 	}
 
 	// Set up the .csv file for logging
@@ -885,14 +857,14 @@ void CAL_CONV gfexfo_
 			}
 		}
 		for (int i = 0; i < nr_of_csv_doubles; i++)
+		{
+			if (CsvWriter_writeField(csv_writer, csv_doubles_header[i]))
 			{
-				if (CsvWriter_writeField(csv_writer, csv_doubles_header[i]))
-				{
-					printf("Error writing .csv file: %s\n", CsvWriter_getErrorMessage(csv_writer));
-					*ierr = -6;
-					return;
-				}
+				printf("Error writing .csv file: %s\n", CsvWriter_getErrorMessage(csv_writer));
+				*ierr = -6;
+				return;
 			}
+		}
 	};
 
 	// Log the variables for this timestep
@@ -910,7 +882,7 @@ void CAL_CONV gfexfo_
 			iinfo[8],
 			iinfo[9],
 			iinfo[10],
-			iinfo[11],
+			iinfo[11]
 		};
 		float csv_floats[] =
 		{
@@ -1019,11 +991,20 @@ void CAL_CONV gfexfo_
 			F_ice_global[5]
 		};
 		CsvWriter_nextRow(csv_writer);
-		char log_buffer[50];
+		char field_buffer[100];
+		int field_buffer_length = (int)sizeof(field_buffer) / sizeof(field_buffer[0]);
 		for (int i = 0; i < nr_of_csv_ints; i++)
 		{
-			sprintf(log_buffer, "%d", csv_ints[i]);
-			if (CsvWriter_writeField(csv_writer, log_buffer))
+			iResult = sprintf(field_buffer, "%d", csv_ints[i]);
+			if (iResult < 0)
+			{
+				printf("Failure converting integer to .csv field string\n");
+			}
+			if (iResult >= field_buffer_length)
+			{
+				printf("Buffer overflow converting integer to .csv field string\n");
+			}
+			if (CsvWriter_writeField(csv_writer, field_buffer))
 			{
 				printf("Error writing .csv file: %s\n", CsvWriter_getErrorMessage(csv_writer));
 				*ierr = -23;
@@ -1032,8 +1013,16 @@ void CAL_CONV gfexfo_
 		}
 		for (int i = 0; i < nr_of_csv_floats; i++)
 		{
-			sprintf(log_buffer, "%f", csv_floats[i]);
-			if (CsvWriter_writeField(csv_writer, log_buffer))
+			sprintf(field_buffer, "%f", csv_floats[i]);
+			if (iResult < 0)
+			{
+				printf("Failure converting float to .csv field string\n");
+			}
+			if (iResult >= field_buffer_length)
+			{
+				printf("Buffer overflow converting float to .csv field string\n");
+			}
+			if (CsvWriter_writeField(csv_writer, field_buffer))
 			{
 				printf("Error writing .csv file: %s\n", CsvWriter_getErrorMessage(csv_writer));
 				*ierr = -24;
@@ -1042,8 +1031,16 @@ void CAL_CONV gfexfo_
 		}
 		for (int i = 0; i < nr_of_csv_doubles; i++)
 		{
-			sprintf(log_buffer, "%f", csv_doubles[i]);
-			if (CsvWriter_writeField(csv_writer, log_buffer))
+			sprintf(field_buffer, "%f", csv_doubles[i]);
+			if (iResult < 0)
+			{
+				printf("Failure converting double to .csv field string\n");
+			}
+			if (iResult >= field_buffer_length)
+			{
+				printf("Buffer overflow converting double to .csv field string\n");
+			}
+			if (CsvWriter_writeField(csv_writer, field_buffer))
 			{
 				printf("Error writing .csv file: %s\n", CsvWriter_getErrorMessage(csv_writer));
 				*ierr = -25;
@@ -1055,7 +1052,6 @@ void CAL_CONV gfexfo_
 	// Last timestep, SAMS won't send anything. Close the connection and logs
 	if (substep_nr_overall == nr_of_substeps_overall)
 	{
-		printf("Last substep. Step %d\n", step_nr);
 		iResult = WSACleanup();
 		if (iResult == SOCKET_ERROR)
 		{
@@ -1068,22 +1064,11 @@ void CAL_CONV gfexfo_
 		return;
 	}
 
-	// Send sea forces to SAMS
-	if (send_to_SAMS(sams_tcp_socket, time, F_sea_SAMS_local) == SOCKET_ERROR)
-	{
-		printf("Error sending TCP data to SAMS: %d\n", WSAGetLastError());
-		closesocket(sams_tcp_socket);
-		WSACleanup();
-		*ierr = -22;
-		return;
-	}
-
 	// Calculations done, prepare for the next timestep
 	for (int i = 0; i < 6; i++)
 	{
 		displacement_SIMA_tm2[i] = displacement_SIMA_tm1[i];
 		displacement_SIMA_tm1[i] = displacement_SIMA_t0.double_precision[i];
-		velocity_SAMS_tm1[i] = velocity_SAMS_t0[i];
 	}
 
 	free(line_buffer); // Not clear why I have to free this and not everything else
@@ -1176,10 +1161,19 @@ int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_time, double displace
 	if (iResult <= 0)
 		return iResult;
 	*SAMS_time = SAMS_to_GFEXFO.double_precision[0];
-	// Rename the axis components and the angle for clarity
+	// Rename the Euler axis components and the Euler angle for clarity
 	double e1 = SAMS_to_GFEXFO.double_precision[4];
 	double e2 = SAMS_to_GFEXFO.double_precision[5];
 	double e3 = SAMS_to_GFEXFO.double_precision[6];
+	double theta_euler = SAMS_to_GFEXFO.double_precision[7];
+	// Check for NaN values
+	if (isnan(e1) || isnan(e2) || isnan(e3) || isnan(theta_euler))
+	{
+		printf("Error at timestep %.1f: axis-angle orientation from SAMS contains bad values\n",*SAMS_time);
+		printf("Euler axis: %f %f %f\n", e1, e2, e3);
+		printf("Euler angle: %f\n", theta_euler);
+		return -1;
+	}
 	for (int i = 0;i < 3;i++)
 		displacement_SAMS[i] = SAMS_to_GFEXFO.double_precision[1 + i]; // Global coordinates
 	// Z in SAMS is positive towards the ground, convert here to Z pointing skyward as in SIMA
@@ -1187,31 +1181,49 @@ int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_time, double displace
 	e3 = -e3;
 	displacement_SAMS[1] = -displacement_SAMS[1];
 	displacement_SAMS[2] = -displacement_SAMS[2];
-	double theta_aa = SAMS_to_GFEXFO.double_precision[7]; // Theta in axis-angle representation
+	
 	// Calculations based on data received from SAMS
-	rotation_matrix_SAMS[0][0] = (1 - cos(theta_aa)) * e1 * e1 + cos(theta_aa);
-	rotation_matrix_SAMS[0][1] = (1 - cos(theta_aa)) * e1 * e2 - e3 * sin(theta_aa);
-	rotation_matrix_SAMS[0][2] = (1 - cos(theta_aa)) * e1 * e3 + e2 * sin(theta_aa);
-	rotation_matrix_SAMS[1][0] = (1 - cos(theta_aa)) * e2 * e1 + e3 * sin(theta_aa);
-	rotation_matrix_SAMS[1][1] = (1 - cos(theta_aa)) * e2 * e2 + cos(theta_aa);
-	rotation_matrix_SAMS[1][2] = (1 - cos(theta_aa)) * e2 * e3 - e1 * sin(theta_aa);
-	rotation_matrix_SAMS[2][0] = (1 - cos(theta_aa)) * e3 * e1 - e2 * sin(theta_aa);
-	rotation_matrix_SAMS[2][1] = (1 - cos(theta_aa)) * e3 * e2 + e1 * sin(theta_aa);
-	rotation_matrix_SAMS[2][2] = (1 - cos(theta_aa)) * e3 * e3 + cos(theta_aa);
-	// TODO express the difference between SAMS and SIMA rotation matrices, define a maximum value (1%?)
+	rotation_matrix_SAMS[0][0] = (1 - cos(theta_euler)) * e1 * e1 + cos(theta_euler);
+	rotation_matrix_SAMS[0][1] = (1 - cos(theta_euler)) * e1 * e2 - e3 * sin(theta_euler);
+	rotation_matrix_SAMS[0][2] = (1 - cos(theta_euler)) * e1 * e3 + e2 * sin(theta_euler);
+	rotation_matrix_SAMS[1][0] = (1 - cos(theta_euler)) * e2 * e1 + e3 * sin(theta_euler);
+	rotation_matrix_SAMS[1][1] = (1 - cos(theta_euler)) * e2 * e2 + cos(theta_euler);
+	rotation_matrix_SAMS[1][2] = (1 - cos(theta_euler)) * e2 * e3 - e1 * sin(theta_euler);
+	rotation_matrix_SAMS[2][0] = (1 - cos(theta_euler)) * e3 * e1 - e2 * sin(theta_euler);
+	rotation_matrix_SAMS[2][1] = (1 - cos(theta_euler)) * e3 * e2 + e1 * sin(theta_euler);
+	rotation_matrix_SAMS[2][2] = (1 - cos(theta_euler)) * e3 * e3 + cos(theta_euler);
+	bool nan_found = false;
+	for (int i = 0;i < 3;i++)
+		for (int j = 0;j < 3;j++)
+			if (isnan(rotation_matrix_SAMS[i][j]))
+				nan_found = true;
+	if (nan_found)
+	{
+		printf("Bad SAMS rotation matrix calculated at timestep %f:\n",*SAMS_time);
+		for (int i = 0;i < 3;i++)
+		{
+			for (int j = 0;j < 3;j++)
+				printf("%f ", rotation_matrix_SAMS[i][j]);
+			printf("\n");
+		}
+		printf("Euler axis: %f %f %f\n", e1, e2, e3);
+		printf("Euler angle: %f\n", theta_euler);
+		return -1;
+	}
+	
 	// Convert the Euler axis-angle representation to Tait-Bryan chained Z-Y-X rotations
+	double theta_zyx = asin(-rotation_matrix_SAMS[2][0]);
+	double phi_zyx = asin(rotation_matrix_SAMS[2][1] / cos(theta_zyx));
+	double psi_zyx = asin(rotation_matrix_SAMS[1][0] / cos(theta_zyx));
 	// The calculations were analytically derived from the rotation matrix definition in SIMO manual, app.C
-	double theta_zyx = asin(-rotation_matrix_SAMS[2][0]); // Theta in Z-Y-X representation
-	double phi = asin(rotation_matrix_SAMS[2][1] / cos(theta_zyx));
-	double psi = asin(rotation_matrix_SAMS[1][0] / cos(theta_zyx));
-	displacement_SAMS[3] = phi;
+	displacement_SAMS[3] = phi_zyx;
 	displacement_SAMS[4] = theta_zyx;
-	displacement_SAMS[5] = psi;
+	displacement_SAMS[5] = psi_zyx;
 	
 	return iResult;
 }
 
-int read_from_SAMS(char* SAMS_resultfile_path, int substep_nr_overall, int nr_of_substeps_overall, double* SAMS_txt_time, double F_ice_global[6], bool called_by_SIMO)
+int read_from_SAMS(char* SAMS_resultfile_path, int substep_nr_overall, int nr_of_substeps_overall, double* SAMS_txt_time, double F_ice_global[6])
 {
 	int* ierr = 0;
 	int iResult = 0;
@@ -1264,9 +1276,8 @@ int read_from_SAMS(char* SAMS_resultfile_path, int substep_nr_overall, int nr_of
 					printf("Waited %.3f seconds at sub-timestep %d for line i=%d from %s\n", j / 1000., substep_nr_overall, i, SAMS_resultfile_path);
 				}
 				Sleep(j);
-				// In case of a SIMO simulation, the 0.0 timestep happened in GFEXFO but SAMS did not write it to .txt
-				lines_to_read = header_lines + substep_nr_overall - (int)called_by_SIMO;
-				i = lines_to_read;
+				lines_to_read = header_lines + substep_nr_overall;
+				i = lines_to_read; // Don't attempt to read any more lines
 				fseek(SAMS_result_file, 0, SEEK_SET);
 				break;
 			case -3:
@@ -1279,7 +1290,7 @@ int read_from_SAMS(char* SAMS_resultfile_path, int substep_nr_overall, int nr_of
 				return *ierr;
 			}
 		}
-		if (!starting_over)
+		if (!starting_over) // The switch-case finished successfully, no more waiting or retries needed
 			break;
 	}
 	if (starting_over)
