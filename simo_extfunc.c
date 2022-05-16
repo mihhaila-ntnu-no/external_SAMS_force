@@ -58,18 +58,19 @@ void CAL_CONV gfexfo_
 	
 	// TODO check that on this machine, float and double have a 2x size difference
 	// TODO determine what should be cleaned up, do it on every error. WSA, buffer free, etc
+	// TODO go over iinfo[] and return zero forces for any unexpected values. Then clean up the .csv
 	
-	// The following arrays are declared as (single-precision) floats in the function definition
-	// In fact, they contain doubles spread over float pairs
+	// The following arrays, declared as floats above, are in fact doubles spread over float pairs
 	union
 	{
 		float single_precision[MGAMMA];
 		double double_precision[MGAMMA / 2]; // 9/2=4 for integers
 	} gamma_float;
+	// The global->local rotation matrix is calculated from the rotational displacement of the body at each timestep
+	// The four first values of gamma[] that are available here were used for confirmation
 	for (int i = 0; i < MGAMMA;i++)
 		gamma_float.single_precision[i] = gamma[body_nr][i];
-	// Because only half of gamma[] is available, the transformation matrix is irretrievable
-	// Thus, the local velocities in vellot[] are in an unknown coordinate system
+	// TODO get linear velocities from here instead of using finite differences
 	union
 	{
 		float single_precision[MVELLOT];
@@ -93,19 +94,19 @@ void CAL_CONV gfexfo_
 	static SOCKET sams_tcp_socket;
 	static WSAPROTOCOL_INFO sams_tcp_socket_info;
 	static CsvWriter* csv_writer;
-	static double displacement_SIMA_tm1[6]; // Timestep t = -1.
-	static double displacement_SIMA_tm2[6]; // Timestep t = -2
-	static double mass_matrix_SIMA[6][6]; // [kg*10^3, kg*m^2*10^3]
-	static double mass_matrix_SAMS[6][6]; // [kg, kg*m]
 	static char SAMS_resultfile_path[MCHEXT];
 	static int nr_of_csv_ints; // For logging
 	static int nr_of_csv_floats;
 	static int nr_of_csv_doubles;
 	static bool called_by_RIFLEX = true; // First assumption
 	static bool called_by_SIMO = false;
+
 	static double F_ice_SIMA_local[6];
-	// Hydrostatic restoring force is modeled as spring stiffness
-	static double stiffness_matrix_SIMA[6][6]; // [kN/m, kN*m]
+	static double displacement_SIMA_tm1[6]; // [m, rad] Timestep t = -1.
+	static double displacement_SIMA_tm2[6]; // [m, rad] Timestep t = -2
+	static double mass_matrix_SIMA[6][6]; // [kg, kg*m^2]
+	static double mass_matrix_SAMS[6][6]; // [kg, kg*m^2]
+	static double stiffness_matrix_SIMA[6][6]; // [N/m, N*m]
 	static double stiffness_reference_SIMA[6]; // [m, rad] Hydrostatic equilibrium position
 
 	// If this is not the first iteration of the timestep, return the forces from the first one
@@ -122,32 +123,31 @@ void CAL_CONV gfexfo_
 	}
 
 	// Working variables
-	double velocity_SIMA_t0[6];
-	double acceleration_SIMA[6];
-	double displacement_SAMS[6];
-	double acceleration_SAMS[6];
-	double inertial_force_SIMA[6]; // [kN, MN*m]
-	double inertial_force_SAMS[6]; // [N]
-	double hydrostatic_force_SIMA[6]; // [kN, MN*m]
-	double hydrostatic_force_SAMS[6]; // [N]
-	double rotation_matrix_SIMA[3][3]; // From global to local
-	double rotation_matrix_SAMS[3][3]; // So X_global = matrix x X_local
-	double F_ice_global[6];
-	double F_sea_global[6]; // Sea forces on structure, as opposed to ice forces
-	double F_sea_SAMS_local[6];
-	double F_coupled_global[6]; // [kN, MN*m] Forces from both sea and ice, calculated by SIMA
+	int iResult; // For error codes
+	char* line_buffer = NULL; // for getline()
+	size_t line_buffer_size = 0; // for getline()
+	char* gfexfo_result_file_name = "gfexfo_sams.csv";
+	char itconfig_file_path[MCHEXT]; // Also used to get the SAMS simulation name
+
 	double timestep_start_time;
 	double timestep_end_time;
 	double SAMS_TCP_time;
 	double SAMS_txt_time;
-	
-	int iResult; // For error codes
-	char* line_buffer = NULL; // for getline()
-	size_t line_buffer_size = 0; // for getline()
 
-	char* gfexfo_result_file_name = "gfexfo_sams.csv";
-	char itconfig_file_path[MCHEXT]; // Also used to get the SAMS simulation name
-	
+	double velocity_SIMA_t0[6];
+	double acceleration_SIMA[6];
+	double displacement_SAMS[6];
+
+	double rotation_matrix_SIMA[3][3]; // From global to local
+	double rotation_matrix_SAMS[3][3]; // So X_global = matrix x X_local
+
+	double inertial_force_SIMA[6]; // [N, N*m]
+	double hydrostatic_force_SIMA[6]; // [N, N*m]
+	double F_ice_global[6]; // [N, N*m]
+	double F_sea_global[6]; // [N, N*m] Sea forces on structure, as opposed to ice forces
+	double F_sea_SAMS_local[6]; // [N, N*m]
+	double F_coupled_global[6]; // [N, N*m] Forces from both sea and ice, calculated by SIMA
+
 	// Simulation setup. Read and assume information.
 	if (run_counter == 1)
 	{
@@ -157,10 +157,11 @@ void CAL_CONV gfexfo_
 			displacement_SIMA_tm1[i] = displacement_SIMA_t0.double_precision[i];
 			displacement_SIMA_tm2[i] = displacement_SIMA_t0.double_precision[i];
 		}
-		FILE* sys_dat_file;
+
 		// Find out which SIMA module is calling this function
+		FILE* sys_dat_file;
+		char* system_description_filename = "sys-sima.dat";
 		{
-			char* system_description_filename = "sys-sima.dat";
 			sys_dat_file = fopen(system_description_filename, "r");
 			if (!sys_dat_file)
 			{
@@ -190,6 +191,7 @@ void CAL_CONV gfexfo_
 				getline(&line_buffer, &line_buffer_size, sys_dat_file);
 			if (getline(&line_buffer, &line_buffer_size, sys_dat_file) != 114)
 				printf("Warning reading mass coefficients from sys.dat: unexpected length of line\n");
+			// The mass matrix is zero-initialised, the 7 unique non-zero values are given in one text line.
 			iResult = sscanf
 			(
 				line_buffer,
@@ -208,10 +210,13 @@ void CAL_CONV gfexfo_
 				*ierr = -8;
 				return;
 			}
-			// TODO instead of keeping working with tons, convert here to SI units
+			// Fill in the symmetric non-zero values
 			mass_matrix_SIMA[1][1] = mass_matrix_SIMA[0][0];
 			mass_matrix_SIMA[2][2] = mass_matrix_SIMA[0][0];
-			// Continue to the stiffness matrix K
+			mass_matrix_SIMA[3][4] = mass_matrix_SIMA[4][3];
+			mass_matrix_SIMA[3][5] = mass_matrix_SIMA[5][3];
+			mass_matrix_SIMA[4][5] = mass_matrix_SIMA[5][4];
+			// Continue to the stiffness reference and stiffness matrix K
 			while (getline(&line_buffer, &line_buffer_size, sys_dat_file) >= 0)
 			{
 				if (strcmp(line_buffer, " STIFFNESS REFERENCE\n") == 0)
@@ -235,11 +240,10 @@ void CAL_CONV gfexfo_
 			);
 			if (iResult != 6)
 			{
-				printf("Error parsing stiffness coefficients from sys.dat\n");
+				printf("Error parsing stiffness reference displacement from sys.dat\n");
 				*ierr = -9;
 				return;
 			}
-			// TODO instead of keeping working with tons, convert here to SI units
 			while (getline(&line_buffer, &line_buffer_size, sys_dat_file) >= 0)
 			{
 				if (strcmp(line_buffer, "'KMAT\n") == 0)
@@ -266,6 +270,12 @@ void CAL_CONV gfexfo_
 					*ierr = -10;
 					return;
 				}
+			}
+			// TODO Check for SIMA setting that decides which units are used for writing M,K the system description file
+			for (int i = 0;i < (6 * 6);i++)
+			{
+				mass_matrix_SIMA[0][i] *= 1000; // kg*1000 -> kg, kg*m^2*1000 -> kg*m^2
+				stiffness_matrix_SIMA[0][i] *= 1000; // N/m*1000 -> N/m, N*m*1000 -> N*m
 			}
 			fclose(sys_dat_file);
 		};
@@ -363,23 +373,23 @@ void CAL_CONV gfexfo_
 		for (int i = 0;i < 3;i++)
 			mass_matrix_SAMS[3 + i][3 + i] = pow(radius_of_gyration_SAMS[i], 2) * mass_matrix_SAMS[i][i];
 		// Check the mass matrix for disrepancies between SAMS and SIMA
-		double mass_matrix_relative_difference[6][6];
+		double mass_matrix_relative_difference[6][6]; // [kg, kg*m^2]
+		// TODO check the stiffness matrix for disrepancies between SAMS and SIMA
 		for (int i = 0;i < 6;i++)
 		{
 			for (int j = 0;j < 6;j++)
 			{
-				// TODO add units to the warning text
 				if (mass_matrix_SAMS[i][j] && mass_matrix_SIMA[i][j])
 				{
-					mass_matrix_relative_difference[i][j] = (mass_matrix_SIMA[i][j] * 1000 - mass_matrix_SAMS[i][j]) / mass_matrix_SIMA[i][j];
+					mass_matrix_relative_difference[i][j] = (mass_matrix_SIMA[i][j] - mass_matrix_SAMS[i][j]) / mass_matrix_SIMA[i][j];
 					if (mass_matrix_relative_difference[i][j] > 0.01)
 					{
 						printf
 						(
-							"Warning: At position [%d][%d], the mass matrix has %lf in SIMA and %lf in SAMS, relative difference %le\n",
+							"Warning: Mass matrix [kg, kg*m^2] coefficient [%d][%d] is %lf in SIMA and %lf in SAMS, relative difference %le\n",
 							i,
 							j,
-							mass_matrix_SIMA[i][j] * 1000,
+							mass_matrix_SIMA[i][j],
 							mass_matrix_SAMS[i][j],
 							mass_matrix_relative_difference[i][j]
 						);
@@ -500,7 +510,7 @@ void CAL_CONV gfexfo_
 			F_ice_global[i] = 0;
 	};
 
-	// Calculate kinematic state, state-dependent forces, global->body transformation matrix
+	// Calculate kinematic state, global->body transformation matrix, state-dependent forces, sea forces
 	{
 		if (called_by_RIFLEX)
 		{
@@ -602,7 +612,6 @@ void CAL_CONV gfexfo_
 		rotation_matrix_SIMA[2][1] = cos(theta) * sin(phi);
 		rotation_matrix_SIMA[2][2] = cos(theta) * cos(phi);
 		// Calculate forces acting on structure, in global coordinates
-		// TODO units?
 		for (int i = 0;i < 6;i++)
 		{
 			inertial_force_SIMA[i] = acceleration_SIMA[i] * mass_matrix_SIMA[i][i];
@@ -610,15 +619,11 @@ void CAL_CONV gfexfo_
 				(stiffness_reference_SIMA[i] - displacement_SIMA_t0.double_precision[i])
 				* stiffness_matrix_SIMA[i][i];
 			F_coupled_global[i] = inertial_force_SIMA[i] + hydrostatic_force_SIMA[i];
+			// F_ice_global[] contains the values from the previous timestep.
+			// The current values will be known after the exchange with SAMS
+			F_sea_global[i] = F_coupled_global[i] - F_ice_global[i];
 		}
-	};
-
-	// Calculate sea forces
-	for (int i = 0;i < 3;i++)
-	{
-		F_sea_global[i] = F_coupled_global[i] - F_ice_global[i] * pow(10, -3); // N -> kN
-		F_sea_global[3+i] = F_coupled_global[3+i] - F_ice_global[3+i] * pow(10, -6); // N*m -> MN*m
-	}
+	};		
 	
 	// Receive TCP data from SAMS
 	{
@@ -657,8 +662,8 @@ void CAL_CONV gfexfo_
 		// Send zero forces until rhythm and coordinate transform are sorted
 		//for (int j = 0;j < 3;j++)
 		//{
-		//	F_sea_SAMS_local[i] += rotation_matrix_SAMS[j][i] * F_sea_global[j] * pow(10, 3); // kN -> N
-		//	F_sea_SAMS_local[3 + i] += rotation_matrix_SAMS[j][i] * F_sea_global[3 + j] * pow(10, 6); // MN*m -> N*m
+		//	F_sea_SAMS_local[i] += rotation_matrix_SAMS[j][i] * F_sea_global[j];
+		//	F_sea_SAMS_local[3 + i] += rotation_matrix_SAMS[j][i] * F_sea_global[3 + j];
 		//}
 	}
 
@@ -698,8 +703,8 @@ void CAL_CONV gfexfo_
 		// Transform the ice forces from global coordinate system to SIMA local
 		for (int j = 0;j < 3;j++)
 		{
-			F_ice_SIMA_local[i] += rotation_matrix_SIMA[j][i] * F_ice_global[j] * pow(10, -3); // N -> kN
-			F_ice_SIMA_local[3 + i] += rotation_matrix_SIMA[j][i] * F_ice_global[3 + j] * pow(10, -6); // N*m -> MN*m
+			F_ice_SIMA_local[i] += rotation_matrix_SIMA[j][i] * F_ice_global[j] / 1000; // N -> kN
+			F_ice_SIMA_local[3 + i] += rotation_matrix_SIMA[j][i] * F_ice_global[3 + j] / 1000000; // N*m -> MN*m
 		}
 		// Save ice forces to SIMA memory
 		stor[i] = F_ice_SIMA_local[i];
@@ -778,31 +783,12 @@ void CAL_CONV gfexfo_
 			"hydrostatic_force_SIMA_3",
 			"hydrostatic_force_SIMA_4",
 			"hydrostatic_force_SIMA_5",
-			"SAMS_Time",
 			"displacement_SAMS_0",
 			"displacement_SAMS_1",
 			"displacement_SAMS_2",
 			"displacement_SAMS_3",
 			"displacement_SAMS_4",
 			"displacement_SAMS_5",
-			"acceleration_SAMS_0",
-			"acceleration_SAMS_1",
-			"acceleration_SAMS_2",
-			"acceleration_SAMS_3",
-			"acceleration_SAMS_4",
-			"acceleration_SAMS_5",
-			"inertial_force_SAMS_0",
-			"inertial_force_SAMS_1",
-			"inertial_force_SAMS_2",
-			"inertial_force_SAMS_3",
-			"inertial_force_SAMS_4",
-			"inertial_force_SAMS_5",
-			"hydrostatic_force_SAMS_0",
-			"hydrostatic_force_SAMS_1",
-			"hydrostatic_force_SAMS_2",
-			"hydrostatic_force_SAMS_3",
-			"hydrostatic_force_SAMS_4",
-			"hydrostatic_force_SAMS_5",
 			"rotation_matrix_SIMA_0_0",
 			"rotation_matrix_SIMA_0_1",
 			"rotation_matrix_SIMA_0_2",
@@ -812,10 +798,6 @@ void CAL_CONV gfexfo_
 			"rotation_matrix_SIMA_2_0",
 			"rotation_matrix_SIMA_2_1",
 			"rotation_matrix_SIMA_2_2",
-			"gamma_0",
-			"gamma_1",
-			"gamma_2",
-			"gamma_3",
 			"rotation_matrix_SAMS_0_0",
 			"rotation_matrix_SAMS_0_1",
 			"rotation_matrix_SAMS_0_2",
@@ -825,12 +807,18 @@ void CAL_CONV gfexfo_
 			"rotation_matrix_SAMS_2_0",
 			"rotation_matrix_SAMS_2_1",
 			"rotation_matrix_SAMS_2_2",
-			"SAMS_ice_force_0",
-			"SAMS_ice_force_1",
-			"SAMS_ice_force_2",
-			"SAMS_ice_force_3",
-			"SAMS_ice_force_4",
-			"SAMS_ice_force_5",
+			"F_ice_global_0",
+			"F_ice_global_1",
+			"F_ice_global_2",
+			"F_ice_global_3",
+			"F_ice_global_4",
+			"F_ice_global_5",
+			"F_sea_global_0",
+			"F_sea_global_1",
+			"F_sea_global_2",
+			"F_sea_global_3",
+			"F_sea_global_4",
+			"F_sea_global_5",
 		};
 		nr_of_csv_ints = (int)sizeof(csv_ints_header) / sizeof(csv_ints_header[0]);
 		nr_of_csv_floats = (int)sizeof(csv_floats_header) / sizeof(csv_floats_header[0]);
@@ -935,31 +923,12 @@ void CAL_CONV gfexfo_
 			hydrostatic_force_SIMA[3],
 			hydrostatic_force_SIMA[4],
 			hydrostatic_force_SIMA[5],
-			SAMS_TCP_time, // SAMS_Time
 			displacement_SAMS[0],
 			displacement_SAMS[1],
 			displacement_SAMS[2],
 			displacement_SAMS[3],
 			displacement_SAMS[4],
 			displacement_SAMS[5],
-			acceleration_SAMS[0],
-			acceleration_SAMS[1],
-			acceleration_SAMS[2],
-			acceleration_SAMS[3],
-			acceleration_SAMS[4],
-			acceleration_SAMS[5],
-			inertial_force_SAMS[0],
-			inertial_force_SAMS[1],
-			inertial_force_SAMS[2],
-			inertial_force_SAMS[3],
-			inertial_force_SAMS[4],
-			inertial_force_SAMS[5],
-			hydrostatic_force_SAMS[0],
-			hydrostatic_force_SAMS[1],
-			hydrostatic_force_SAMS[2],
-			hydrostatic_force_SAMS[3],
-			hydrostatic_force_SAMS[4],
-			hydrostatic_force_SAMS[5],
 			rotation_matrix_SIMA[0][0],
 			rotation_matrix_SIMA[0][1],
 			rotation_matrix_SIMA[0][2],
@@ -969,10 +938,6 @@ void CAL_CONV gfexfo_
 			rotation_matrix_SIMA[2][0],
 			rotation_matrix_SIMA[2][1],
 			rotation_matrix_SIMA[2][2],
-			gamma_float.double_precision[0],
-			gamma_float.double_precision[1],
-			gamma_float.double_precision[2],
-			gamma_float.double_precision[3],
 			rotation_matrix_SAMS[0][0],
 			rotation_matrix_SAMS[0][1],
 			rotation_matrix_SAMS[0][2],
@@ -987,7 +952,13 @@ void CAL_CONV gfexfo_
 			F_ice_global[2],
 			F_ice_global[3],
 			F_ice_global[4],
-			F_ice_global[5]
+			F_ice_global[5],
+			F_sea_global[0],
+			F_sea_global[1],
+			F_sea_global[2],
+			F_sea_global[3],
+			F_sea_global[4],
+			F_sea_global[5]
 		};
 		CsvWriter_nextRow(csv_writer);
 		char field_buffer[100];
