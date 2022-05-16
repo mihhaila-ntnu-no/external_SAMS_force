@@ -96,7 +96,7 @@ void CAL_CONV gfexfo_
 	static double displacement_SIMA_tm1[6]; // Timestep t = -1.
 	static double displacement_SIMA_tm2[6]; // Timestep t = -2
 	static double mass_matrix_SIMA[6][6]; // [kg*10^3, kg*m^2*10^3]
-	static double mass_matrix_SAMS[6][6]; // [kg]
+	static double mass_matrix_SAMS[6][6]; // [kg, kg*m]
 	static char SAMS_resultfile_path[MCHEXT];
 	static int nr_of_csv_ints; // For logging
 	static int nr_of_csv_floats;
@@ -157,9 +157,9 @@ void CAL_CONV gfexfo_
 			displacement_SIMA_tm1[i] = displacement_SIMA_t0.double_precision[i];
 			displacement_SIMA_tm2[i] = displacement_SIMA_t0.double_precision[i];
 		}
-		// Read the M and K matrices from sys.dat, find out which SIMA module is calling this function
+		FILE* sys_dat_file;
+		// Find out which SIMA module is calling this function
 		{
-			FILE* sys_dat_file;
 			char* system_description_filename = "sys-sima.dat";
 			sys_dat_file = fopen(system_description_filename, "r");
 			if (!sys_dat_file)
@@ -177,7 +177,9 @@ void CAL_CONV gfexfo_
 				*ierr = -7;
 				return;
 			}
-			
+		}
+		// Read the mass matrix M and stiffness matrix K
+		{
 			while (getline(&line_buffer, &line_buffer_size, sys_dat_file) >= 0)
 			{
 				if (strcmp(line_buffer, " MASS COEFFICIENTS\n") == 0)
@@ -206,8 +208,10 @@ void CAL_CONV gfexfo_
 				*ierr = -8;
 				return;
 			}
+			// TODO instead of keeping working with tons, convert here to SI units
 			mass_matrix_SIMA[1][1] = mass_matrix_SIMA[0][0];
 			mass_matrix_SIMA[2][2] = mass_matrix_SIMA[0][0];
+			// Continue to the stiffness matrix K
 			while (getline(&line_buffer, &line_buffer_size, sys_dat_file) >= 0)
 			{
 				if (strcmp(line_buffer, " STIFFNESS REFERENCE\n") == 0)
@@ -215,7 +219,6 @@ void CAL_CONV gfexfo_
 			}
 			for (int i = 0;i < 2;i++)
 				getline(&line_buffer, &line_buffer_size, sys_dat_file); // Skip the separator line and headers
-
 			int line_length = getline(&line_buffer, &line_buffer_size, sys_dat_file);
 			if (line_length < 98 || line_length > 104)
 				printf("Warning reading stiffness reference from %s: unexpected line length\n", system_description_filename);
@@ -236,6 +239,7 @@ void CAL_CONV gfexfo_
 				*ierr = -9;
 				return;
 			}
+			// TODO instead of keeping working with tons, convert here to SI units
 			while (getline(&line_buffer, &line_buffer_size, sys_dat_file) >= 0)
 			{
 				if (strcmp(line_buffer, "'KMAT\n") == 0)
@@ -305,6 +309,7 @@ void CAL_CONV gfexfo_
 		double radius_of_gyration_SAMS[3];
 		// Read the structure mass coefficients from SAMS
 		{
+			// TODO check that the hydrostatic properties are {} empty
 			char structure_file_path[MCHEXT];
 			strncpy(structure_file_path, chext[1] + 1, MCHEXT - 1);
 			structure_file_path[MCHEXT - 1] = '\0';
@@ -358,12 +363,12 @@ void CAL_CONV gfexfo_
 		for (int i = 0;i < 3;i++)
 			mass_matrix_SAMS[3 + i][3 + i] = pow(radius_of_gyration_SAMS[i], 2) * mass_matrix_SAMS[i][i];
 		// Check the mass matrix for disrepancies between SAMS and SIMA
-		// TODO add units to the warning text
 		double mass_matrix_relative_difference[6][6];
 		for (int i = 0;i < 6;i++)
 		{
 			for (int j = 0;j < 6;j++)
 			{
+				// TODO add units to the warning text
 				if (mass_matrix_SAMS[i][j] && mass_matrix_SIMA[i][j])
 				{
 					mass_matrix_relative_difference[i][j] = (mass_matrix_SIMA[i][j] * 1000 - mass_matrix_SAMS[i][j]) / mass_matrix_SIMA[i][j];
@@ -383,9 +388,6 @@ void CAL_CONV gfexfo_
 				}
 			}
 		}
-
-		// TODO check that the hydrostatic properties are {} empty in the .structure.txt file
-
 		// Connect to SAMS
 		sams_tcp_socket = connect_to_SAMS();
 		if (sams_tcp_socket == INVALID_SOCKET)
@@ -395,7 +397,6 @@ void CAL_CONV gfexfo_
 			*ierr = -27;
 			return;
 		}
-
 		// Find the SAMS result .txt file with the latest timestamp in the name
 		{
 			// This file will exist as soon as the SAMS simulation is launched, even if no information has been exchanged yet
@@ -494,11 +495,9 @@ void CAL_CONV gfexfo_
 			FindClose(found_handle); // Always, Always, clean things up!
 			sprintf(SAMS_resultfile_path, "%s%s", SAMS_resultfolder_path, SAMS_resultfile_name_latest);
 		}
-
 		// Assume zero ice forces for the first timestep
 		for (int i = 0;i < 6;i++)
 			F_ice_global[i] = 0;
-
 	};
 
 	// Calculate kinematic state, state-dependent forces, global->body transformation matrix
