@@ -383,8 +383,7 @@ void CAL_CONV gfexfo_
 		// Calculate the mass moments of inertia from the radii of gyration
 		for (int i = 0;i < 3;i++)
 			mass_matrix_SAMS[3 + i][3 + i] = pow(radius_of_gyration_SAMS[i], 2) * mass_matrix_SAMS[i][i];
-		// TODO check the mass matrix for disrepancies between SAMS and SIMA
-		// Wrote the check, but the mass matrices are obviously different and there is no warning
+		// Check the mass matrix for disrepancies between SAMS and SIMA
 		double mass_matrix_relative_difference[6][6]; // [kg, kg*m^2]
 		// TODO check the stiffness matrix for disrepancies between SAMS and SIMA
 		for (int i = 0;i < 6;i++)
@@ -394,16 +393,16 @@ void CAL_CONV gfexfo_
 				if (mass_matrix_SAMS[i][j] && mass_matrix_SIMA[i][j])
 				{
 					mass_matrix_relative_difference[i][j] = (mass_matrix_SIMA[i][j] - mass_matrix_SAMS[i][j]) / mass_matrix_SIMA[i][j];
-					if (mass_matrix_relative_difference[i][j] > 0.01)
+					if (fabs(mass_matrix_relative_difference[i][j]) > 0.01)
 					{
 						printf
 						(
-							"Warning: Mass matrix [kg, kg*m^2] coefficient [%d][%d] is %lf in SIMA and %lf in SAMS, relative difference %le\n",
+							"Warning: Mass matrix [kg, kg*m^2] coefficient [%d][%d] is %.0lf in SIMA and %.0lf in SAMS, relative difference %.1lf%%\n",
 							i,
 							j,
 							mass_matrix_SIMA[i][j],
 							mass_matrix_SAMS[i][j],
-							mass_matrix_relative_difference[i][j]
+							mass_matrix_relative_difference[i][j]*100
 						);
 						(*ierr)++;
 					}
@@ -535,7 +534,7 @@ void CAL_CONV gfexfo_
 			timestep_start_time = rinfo[0];
 			timestep_end_time = rinfo[0] + dt;
 		}
-		// Calculate kinematic state in global coordinates from displacement history
+		// Calculate kinematic state in SIMA global coordinates from displacement history
 		for (int i = 0;i < 3;i++)
 		{
 			double rotation_velocity_negative_jump;
