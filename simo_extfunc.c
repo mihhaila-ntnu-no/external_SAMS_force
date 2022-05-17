@@ -41,7 +41,7 @@ void CAL_CONV gfexfo_
 	// *ierr will be incremented in case of a warning, so at the end of execution the warnings can be counted
 	// In case of an error, *ierr will be set to a negative value and gfexfo_() will return
 	// The error values decrease sequentially as they appear in the code, but this hasn't shown up in SIMA so far
-	// Lowest used value: -34
+	// Lowest used value: -35
 	*ierr = 0;
 
 	// TODO try simulating with more than 1 substep, is dt referring to the length of one step or substep?
@@ -100,6 +100,7 @@ void CAL_CONV gfexfo_
 	static int nr_of_csv_doubles;
 	static bool called_by_RIFLEX = true; // First assumption
 	static bool called_by_SIMO = false;
+	static int previous_iteration_count; // To check whether we always get a second iteration
 
 	static double F_ice_SIMA_local[6];
 	static double displacement_SIMA_tm1[6]; // [m, rad] Timestep t = -1.
@@ -109,9 +110,10 @@ void CAL_CONV gfexfo_
 	static double stiffness_matrix_SIMA[6][6]; // [N/m, N*m]
 	static double stiffness_reference_SIMA[6]; // [m, rad] Hydrostatic equilibrium position
 
-	// If this is not the first iteration of the timestep, return the forces from the first one
+	// If this is not the first iteration of a timestep, return the forces from the first one
 	if (iinfo[11] > 0) // iinfo[11] = iteration nr, starting from 0
 	{
+		previous_iteration_count = iinfo[11]+1;
 		for (int i = 0;i < 3;i++)
 		{
 			stor[i] = F_ice_SIMA_local[i];
@@ -119,6 +121,13 @@ void CAL_CONV gfexfo_
 			stor[6 + i] = 0.; // "internal parameter", don't know what for
 		}
 		*ierr = 0;
+		return;
+	}
+	// This is the first iteration of a timestep
+	if ((substep_nr_overall > 1) && (previous_iteration_count < 2))
+	{
+		printf("Error: less than 2 iterations performed on timestep %d\n", substep_nr_overall - 1);
+		*ierr = -35;
 		return;
 	}
 
@@ -138,15 +147,17 @@ void CAL_CONV gfexfo_
 	double acceleration_SIMA[6];
 	double displacement_SAMS[6];
 
-	double rotation_matrix_SIMA[3][3]; // From global to local
-	double rotation_matrix_SAMS[3][3]; // So X_global = matrix x X_local
+	// Matrix describes rotation from global to local: X_global = M x X_local
+	double rotation_matrix_SIMA[3][3]; // From SIMA global to SIMA local
+	double rotation_matrix_SAMS[3][3]; // From SIMA global to SAMS local
+	double rotation_matrix_SAMS_SIMA[3][3] = { {1,0,0},{0,-1,0},{0,0,-1} }; // From SIMA global to SAMS global
 
 	double inertial_force_SIMA[6]; // [N, N*m]
 	double hydrostatic_force_SIMA[6]; // [N, N*m]
-	double F_ice_global[6]; // [N, N*m]
-	double F_sea_global[6]; // [N, N*m] Sea forces on structure, as opposed to ice forces
+	double F_ice_SIMA_global[6]; // [N, N*m]
+	double F_sea_SIMA_global[6]; // [N, N*m] Sea forces on structure, as opposed to ice forces
 	double F_sea_SAMS_local[6]; // [N, N*m]
-	double F_coupled_global[6]; // [N, N*m] Forces from both sea and ice, calculated by SIMA
+	double F_coupled_SIMA_global[6]; // [N, N*m] Forces from both sea and ice, calculated by SIMA
 
 	// Simulation setup. Read and assume information.
 	if (run_counter == 1)
@@ -372,7 +383,8 @@ void CAL_CONV gfexfo_
 		// Calculate the mass moments of inertia from the radii of gyration
 		for (int i = 0;i < 3;i++)
 			mass_matrix_SAMS[3 + i][3 + i] = pow(radius_of_gyration_SAMS[i], 2) * mass_matrix_SAMS[i][i];
-		// Check the mass matrix for disrepancies between SAMS and SIMA
+		// TODO check the mass matrix for disrepancies between SAMS and SIMA
+		// Wrote the check, but the mass matrices are obviously different and there is no warning
 		double mass_matrix_relative_difference[6][6]; // [kg, kg*m^2]
 		// TODO check the stiffness matrix for disrepancies between SAMS and SIMA
 		for (int i = 0;i < 6;i++)
@@ -507,7 +519,8 @@ void CAL_CONV gfexfo_
 		}
 		// Assume zero ice forces for the first timestep
 		for (int i = 0;i < 6;i++)
-			F_ice_global[i] = 0;
+			F_ice_SIMA_global[i] = 0;
+		// TODO check for differences in water and air densities between .itconfig and function arguments
 	};
 
 	// Calculate kinematic state, global->body transformation matrix, state-dependent forces, sea forces
@@ -618,10 +631,10 @@ void CAL_CONV gfexfo_
 			hydrostatic_force_SIMA[i] =
 				(stiffness_reference_SIMA[i] - displacement_SIMA_t0.double_precision[i])
 				* stiffness_matrix_SIMA[i][i];
-			F_coupled_global[i] = inertial_force_SIMA[i] + hydrostatic_force_SIMA[i];
+			F_coupled_SIMA_global[i] = inertial_force_SIMA[i] + hydrostatic_force_SIMA[i];
 			// F_ice_global[] contains the values from the previous timestep.
 			// The current values will be known after the exchange with SAMS
-			F_sea_global[i] = F_coupled_global[i] - F_ice_global[i];
+			F_sea_SIMA_global[i] = F_coupled_SIMA_global[i] - F_ice_SIMA_global[i];
 		}
 	};		
 	
@@ -654,17 +667,18 @@ void CAL_CONV gfexfo_
 		// TODO express the difference between SAMS and SIMA rotation matrices, define a maximum value (1%?)
 	}
 
-	// Transform the sea forces from global coordinate system to SAMS local
+	// Transform the sea forces from SIMA global coordinate system to SAMS local
 	for (int i = 0;i < 3;i++)
 	{
+		F_sea_SIMA_global[i] = 0; // TODO until the coordinate stuff is sorted
+		F_sea_SIMA_global[3 + i] = 0; // TODO until the coordinate stuff is sorted
 		F_sea_SAMS_local[i] = 0;
 		F_sea_SAMS_local[3 + i] = 0;
-		// Send zero forces until rhythm and coordinate transform are sorted
-		//for (int j = 0;j < 3;j++)
-		//{
-		//	F_sea_SAMS_local[i] += rotation_matrix_SAMS[j][i] * F_sea_global[j];
-		//	F_sea_SAMS_local[3 + i] += rotation_matrix_SAMS[j][i] * F_sea_global[3 + j];
-		//}
+		for (int j = 0;j < 3;j++)
+		{
+			F_sea_SAMS_local[i] += rotation_matrix_SAMS[j][i] * F_sea_SIMA_global[j];
+			F_sea_SAMS_local[3 + i] += rotation_matrix_SAMS[j][i] * F_sea_SIMA_global[3 + j];
+		}
 	}
 
 	// Send sea forces to SAMS
@@ -680,7 +694,7 @@ void CAL_CONV gfexfo_
 	// Read ice forces from the SAMS result .txt file
 	{
 		// For SIMO simulations, the i=0, t=0.0 line will not be written. Skip reading it
-		iResult = read_from_SAMS(SAMS_resultfile_path, substep_nr_overall, nr_of_substeps_overall, &SAMS_txt_time, F_ice_global);
+		iResult = read_from_SAMS(SAMS_resultfile_path, substep_nr_overall, nr_of_substeps_overall, &SAMS_txt_time, F_ice_SIMA_global);
 		if (iResult < 0)
 		{
 			*ierr = iResult;
@@ -703,8 +717,8 @@ void CAL_CONV gfexfo_
 		// Transform the ice forces from global coordinate system to SIMA local
 		for (int j = 0;j < 3;j++)
 		{
-			F_ice_SIMA_local[i] += rotation_matrix_SIMA[j][i] * F_ice_global[j] / 1000; // N -> kN
-			F_ice_SIMA_local[3 + i] += rotation_matrix_SIMA[j][i] * F_ice_global[3 + j] / 1000000; // N*m -> MN*m
+			F_ice_SIMA_local[i] += rotation_matrix_SIMA[j][i] * F_ice_SIMA_global[j] / 1000; // N -> kN
+			F_ice_SIMA_local[3 + i] += rotation_matrix_SIMA[j][i] * F_ice_SIMA_global[3 + j] / 1000000; // N*m -> MN*m
 		}
 		// Save ice forces to SIMA memory
 		stor[i] = F_ice_SIMA_local[i];
@@ -730,11 +744,10 @@ void CAL_CONV gfexfo_
 			"IGRAV",
 			"ISTORE",
 			"ITER",
+			"previous_iteration_count"
 		};
 		char* csv_floats_header[] =
 		{
-			"TIME",
-			"DT",
 			"GRAV",
 			"RHOW",
 			"RHOA",
@@ -869,12 +882,11 @@ void CAL_CONV gfexfo_
 			iinfo[8],
 			iinfo[9],
 			iinfo[10],
-			iinfo[11]
+			iinfo[11],
+			previous_iteration_count
 		};
 		float csv_floats[] =
 		{
-			rinfo[0],
-			rinfo[1],
 			rinfo[2],
 			rinfo[3],
 			rinfo[4],
@@ -947,18 +959,18 @@ void CAL_CONV gfexfo_
 			rotation_matrix_SAMS[2][0],
 			rotation_matrix_SAMS[2][1],
 			rotation_matrix_SAMS[2][2],
-			F_ice_global[0],
-			F_ice_global[1],
-			F_ice_global[2],
-			F_ice_global[3],
-			F_ice_global[4],
-			F_ice_global[5],
-			F_sea_global[0],
-			F_sea_global[1],
-			F_sea_global[2],
-			F_sea_global[3],
-			F_sea_global[4],
-			F_sea_global[5]
+			F_ice_SIMA_global[0],
+			F_ice_SIMA_global[1],
+			F_ice_SIMA_global[2],
+			F_ice_SIMA_global[3],
+			F_ice_SIMA_global[4],
+			F_ice_SIMA_global[5],
+			F_sea_SIMA_global[0],
+			F_sea_SIMA_global[1],
+			F_sea_SIMA_global[2],
+			F_sea_SIMA_global[3],
+			F_sea_SIMA_global[4],
+			F_sea_SIMA_global[5]
 		};
 		CsvWriter_nextRow(csv_writer);
 		char field_buffer[100];
@@ -1144,43 +1156,34 @@ int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_time, double displace
 		printf("Euler angle: %f\n", theta_euler);
 		return -1;
 	}
-	for (int i = 0;i < 3;i++)
-		displacement_SAMS[i] = SAMS_to_GFEXFO.double_precision[1 + i]; // Global coordinates
-	// Z in SAMS is positive towards the ground, convert here to Z pointing skyward as in SIMA
-	e2 = -e2;
-	e3 = -e3;
-	displacement_SAMS[1] = -displacement_SAMS[1];
-	displacement_SAMS[2] = -displacement_SAMS[2];
-	
-	// Calculations based on data received from SAMS
-	rotation_matrix_SAMS[0][0] = (1 - cos(theta_euler)) * e1 * e1 + cos(theta_euler);
-	rotation_matrix_SAMS[0][1] = (1 - cos(theta_euler)) * e1 * e2 - e3 * sin(theta_euler);
-	rotation_matrix_SAMS[0][2] = (1 - cos(theta_euler)) * e1 * e3 + e2 * sin(theta_euler);
-	rotation_matrix_SAMS[1][0] = (1 - cos(theta_euler)) * e2 * e1 + e3 * sin(theta_euler);
-	rotation_matrix_SAMS[1][1] = (1 - cos(theta_euler)) * e2 * e2 + cos(theta_euler);
-	rotation_matrix_SAMS[1][2] = (1 - cos(theta_euler)) * e2 * e3 - e1 * sin(theta_euler);
-	rotation_matrix_SAMS[2][0] = (1 - cos(theta_euler)) * e3 * e1 - e2 * sin(theta_euler);
-	rotation_matrix_SAMS[2][1] = (1 - cos(theta_euler)) * e3 * e2 + e1 * sin(theta_euler);
-	rotation_matrix_SAMS[2][2] = (1 - cos(theta_euler)) * e3 * e3 + cos(theta_euler);
-	bool nan_found = false;
+	double rotation_matrix_SAMS_internal[3][3];
+	// Calculate the SAMS global -> SAMS local rotation matrix
+	rotation_matrix_SAMS_internal[0][0] = (1 - cos(theta_euler)) * e1 * e1 + cos(theta_euler);
+	rotation_matrix_SAMS_internal[0][1] = (1 - cos(theta_euler)) * e1 * e2 - e3 * sin(theta_euler);
+	rotation_matrix_SAMS_internal[0][2] = (1 - cos(theta_euler)) * e1 * e3 + e2 * sin(theta_euler);
+	rotation_matrix_SAMS_internal[1][0] = (1 - cos(theta_euler)) * e2 * e1 + e3 * sin(theta_euler);
+	rotation_matrix_SAMS_internal[1][1] = (1 - cos(theta_euler)) * e2 * e2 + cos(theta_euler);
+	rotation_matrix_SAMS_internal[1][2] = (1 - cos(theta_euler)) * e2 * e3 - e1 * sin(theta_euler);
+	rotation_matrix_SAMS_internal[2][0] = (1 - cos(theta_euler)) * e3 * e1 - e2 * sin(theta_euler);
+	rotation_matrix_SAMS_internal[2][1] = (1 - cos(theta_euler)) * e3 * e2 + e1 * sin(theta_euler);
+	rotation_matrix_SAMS_internal[2][2] = (1 - cos(theta_euler)) * e3 * e3 + cos(theta_euler);
+	// SAMS has the global Z axis pointing to the ground, SIMA to the sky
+	double rotation_matrix_SAMS_SIMA[3][3] = { {1,0,0},{0,-1,0},{0,0,-1} };
+	// Pre-multiply the SAMS global->local matrix with a 180 degree rotation around global X
 	for (int i = 0;i < 3;i++)
 		for (int j = 0;j < 3;j++)
-			if (isnan(rotation_matrix_SAMS[i][j]))
-				nan_found = true;
-	if (nan_found)
-	{
-		printf("Bad SAMS rotation matrix calculated at timestep %f:\n",*SAMS_time);
-		for (int i = 0;i < 3;i++)
 		{
-			for (int j = 0;j < 3;j++)
-				printf("%f ", rotation_matrix_SAMS[i][j]);
-			printf("\n");
+			rotation_matrix_SAMS[i][j] = 0;
+			for (int k = 0;k < 3;k++)
+				rotation_matrix_SAMS[i][j] += rotation_matrix_SAMS_SIMA[i][k] * rotation_matrix_SAMS_internal[k][j];
 		}
-		printf("Euler axis: %f %f %f\n", e1, e2, e3);
-		printf("Euler angle: %f\n", theta_euler);
-		return -1;
+	// Return the SAMS global displacement vector in the SIMA global coordinate frame
+	for (int i = 0;i < 3;i++)
+	{
+		displacement_SAMS[i] = 0;
+		for (int j = 0;j < 3;j++)
+			displacement_SAMS[i] += rotation_matrix_SAMS_SIMA[i][j] * SAMS_to_GFEXFO.double_precision[1 + j];
 	}
-	
 	// Convert the Euler axis-angle representation to Tait-Bryan chained Z-Y-X rotations
 	double theta_zyx = asin(-rotation_matrix_SAMS[2][0]);
 	double phi_zyx = asin(rotation_matrix_SAMS[2][1] / cos(theta_zyx));
@@ -1284,12 +1287,20 @@ int read_from_SAMS(char* SAMS_resultfile_path, int substep_nr_overall, int nr_of
 	}
 	// Collect time and ice forces
 	*SAMS_txt_time = SAMS_txt_output[0];
+	// Matrix describing rotation from SIMA global to SAMS global
+	double rotation_matrix_SAMS_SIMA[3][3] = { {1,0,0},{0,-1,0},{0,0,-1} };
+	// Return ice forces in the SIMA global coordinate frame
 	for (int i = 0;i < 3;i++)
 	{
-		// Linear forces are composed of breaking and rubble forces
-		F_ice_global[i] = SAMS_txt_output[20 + i] + SAMS_txt_output[23 + i];
-		// Rotational forces are given as total torque in global frame
-		F_ice_global[3 + i] = SAMS_txt_output[26 + i];
+		F_ice_global[i] = 0;
+		F_ice_global[3 + i] = 0;
+		for (int j = 0;j < 3;j++)
+		{
+			// Linear forces are composed of breaking and rubble forces
+			F_ice_global[i] += rotation_matrix_SAMS_SIMA[i][j] * (SAMS_txt_output[20 + i] + SAMS_txt_output[23 + i]);
+			// Rotational forces are given as total torque in SAMS global frame
+			F_ice_global[3 + i] += rotation_matrix_SAMS_SIMA[i][j] * SAMS_txt_output[26 + i];
+		}
 	}
 	return iResult; // 0 if success, negative error code in case of failure
 	if (substep_nr_overall == nr_of_substeps_overall)
