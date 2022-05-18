@@ -43,7 +43,7 @@ void CAL_CONV gfexfo_
 	// *ierr will be incremented in case of a warning, so at the end of execution the warnings can be counted
 	// In case of an error, *ierr will be set to a negative value and gfexfo_() will return
 	// The error values decrease sequentially as they appear in the code, but this hasn't shown up in SIMA so far
-	// Lowest used value: -35
+	// Lowest used value: -36
 	*ierr = 0;
 
 	// TODO try simulating with more than 1 substep, is dt referring to the length of one step or substep?
@@ -155,6 +155,7 @@ void CAL_CONV gfexfo_
 	double SAMS_txt_time = 0; // [s]
 
 	double coupling_acceleration[6]; // [m/s^2, rad/s^2] Acceleration necessary for the SAMS structure to catch up
+	double coupling_velocity[6];
 	double displacement_SAMS_t0[6]; // [m, rad]
 
 	// Matrix describes rotation from global to local: X_global = M x X_local
@@ -543,67 +544,6 @@ void CAL_CONV gfexfo_
 			timestep_start_time = rinfo[0] - dt;
 			timestep_end_time = rinfo[0];
 		}
-		// Calculate kinematic state in SIMA global coordinates from displacement history
-		for (int i = 0;i < 3;i++)
-		{
-			double rotation_velocity_negative_jump;
-			double rotation_velocity_positive_jump;
-			double rotation_acceleration_negative_jump;
-			double rotation_acceleration_positive_jump;
-			// Calculate translational velocities and accelerations as backward finite differences of displacement.
-			// In the simulation beginning, unknown values are assumed 0
-			coupling_acceleration[i] =
-				(
-					displacement_SAMS_tm2[i]
-					- 2 * displacement_SAMS_tm1[i]
-					+ displacement_SIMA_t0.double_precision[i]
-					) / pow(dt, 2);
-			// Calculate rotational velocities and accelerations, check for 0-360 = 0-2pi transition jump
-			rotation_velocity_negative_jump =
-				(
-					-displacement_SAMS_tm1[3 + i]
-					+ displacement_SIMA_t0.double_precision[3 + i]
-					- 2 * M_PI
-					) / dt;
-			rotation_velocity_positive_jump =
-				(
-					-displacement_SAMS_tm1[3 + i]
-					+ displacement_SIMA_t0.double_precision[3 + i]
-					+ 2 * M_PI
-					) / dt;
-			// TODO these are rotational joint velocities, each of them has its own coordinate frame
-			// This method of finding the accelerations neglects the fact that the coordinate frames change over dt
-			// Rather, the joint velocities should be converted to a angular velocity vector in the global frame
-			// Then, will its derivative be equal to an acceleration vector? Maybe, check literature
-			// TODO a Google search even suggests that the acceleration vector could be found by differentiating the rotation matrix
-			// With small angles, the rotational joint velocities are very close to the global-frame angular velocities
-			// All this shown on paper notes, page 9
-			coupling_acceleration[3 + i] =
-				(
-					displacement_SAMS_tm2[3 + i]
-					- 2 * displacement_SAMS_tm1[3 + i]
-					+ displacement_SIMA_t0.double_precision[3 + i]
-					) / pow(dt, 2);
-			rotation_acceleration_negative_jump =
-				(
-					displacement_SAMS_tm2[3 + i]
-					- 2 * displacement_SAMS_tm1[3 + i]
-					+ displacement_SIMA_t0.double_precision[3 + i]
-					- 2 * M_PI
-					) / pow(dt, 2);
-			rotation_acceleration_positive_jump =
-				(
-					displacement_SAMS_tm2[3 + i]
-					- 2 * displacement_SAMS_tm1[3 + i]
-					+ displacement_SIMA_t0.double_precision[3 + i]
-					+ 2 * M_PI
-					) / pow(dt, 2);
-			if (abs(coupling_acceleration[3 + i]) > abs(rotation_acceleration_negative_jump))
-				coupling_acceleration[3 + i] = rotation_acceleration_negative_jump;
-			if (abs(coupling_acceleration[3 + i]) > abs(rotation_acceleration_positive_jump))
-				coupling_acceleration[3 + i] = rotation_acceleration_positive_jump;
-
-		}
 		// Rename the sequential angular displacements for clarity
 		double phi = displacement_SIMA_t0.double_precision[3];
 		double theta = displacement_SIMA_t0.double_precision[4];
@@ -618,6 +558,58 @@ void CAL_CONV gfexfo_
 		rotation_matrix_SIMA[2][0] = -sin(theta);
 		rotation_matrix_SIMA[2][1] = cos(theta) * sin(phi);
 		rotation_matrix_SIMA[2][2] = cos(theta) * cos(phi);
+		// Calculate kinematic state in SIMA global coordinates from displacement history
+		for (int i = 0;i < 3;i++)
+		{
+			double rotation_velocity_negative_jump;
+			double rotation_velocity_positive_jump;
+			double rotation_acceleration_negative_jump;
+			double rotation_acceleration_positive_jump;
+			// Calculate translational velocities and accelerations as backward finite differences of displacement.
+			// In the simulation beginning, unknown values are assumed 0
+			coupling_velocity[i] =
+				(
+					-displacement_SAMS_tm1[i]
+					+ displacement_SIMA_t0.double_precision[i]
+					) / dt;
+			coupling_acceleration[i] =
+				(
+					displacement_SAMS_tm2[i]
+					- 2 * displacement_SAMS_tm1[i]
+					+ displacement_SIMA_t0.double_precision[i]
+					) / pow(dt, 2);
+			// Calculate rotational velocities and accelerations, check for 0-360 = 0-2pi transition jump
+			coupling_velocity[3 + i] =
+				(
+					-displacement_SAMS_tm1[3 + i]
+					+ displacement_SIMA_t0.double_precision[3 + i]
+					) / dt;
+			rotation_velocity_negative_jump = coupling_velocity[3 + i] - 2 * M_PI / dt;
+			rotation_velocity_positive_jump = coupling_velocity[3 + i] + 2 * M_PI / dt;
+			if (abs(coupling_velocity[3 + i]) > abs(rotation_velocity_negative_jump))
+				coupling_velocity[3 + i] = rotation_velocity_negative_jump;
+			if (abs(coupling_velocity[3 + i]) > abs(rotation_velocity_positive_jump))
+				coupling_velocity[3 + i] = rotation_velocity_positive_jump;
+			// TODO these are rotational joint velocities, each of them has its own coordinate frame
+			// This method of finding the accelerations neglects the fact that the coordinate frames change over dt
+			// Rather, the joint velocities should be converted to a angular velocity vector in the global frame
+			// Then, will its derivative be equal to an acceleration vector? Maybe, check literature
+			// TODO a Google search even suggests that the acceleration vector could be found by differentiating the rotation matrix
+			// With small angles, the rotational joint velocities are very close to the global-frame angular velocities
+			// All this shown on paper notes, page 9
+			coupling_acceleration[3 + i] =
+				(
+					displacement_SAMS_tm2[3 + i]
+					- 2 * displacement_SAMS_tm1[3 + i]
+					+ displacement_SIMA_t0.double_precision[3 + i]
+					) / pow(dt, 2);
+			rotation_acceleration_negative_jump = coupling_acceleration[3 + i] - 2 * M_PI / pow(dt, 2);
+			rotation_acceleration_positive_jump = coupling_acceleration[3 + i] + 2 * M_PI / pow(dt, 2);
+			if (abs(coupling_acceleration[3 + i]) > abs(rotation_acceleration_negative_jump))
+				coupling_acceleration[3 + i] = rotation_acceleration_negative_jump;
+			if (abs(coupling_acceleration[3 + i]) > abs(rotation_acceleration_positive_jump))
+				coupling_acceleration[3 + i] = rotation_acceleration_positive_jump;
+		}
 		// Calculate coupling force necessary for SAMS to catch up, in global coordinates
 		for (int i = 0;i < 6;i++)
 		{
@@ -627,7 +619,8 @@ void CAL_CONV gfexfo_
 				* stiffness_matrix_SIMA[i][i];
 			F_coupling_SIMA_global[i] = F_coupling_inertial[i] + F_coupling_hydrostatic[i];
 		}
-	};		
+		// Make a prediction about the position of the SAMS structure
+	}
 	
 	// Receive TCP data from SAMS
 	{
@@ -638,10 +631,11 @@ void CAL_CONV gfexfo_
 			return;
 		}
 		iResult = receive_from_SAMS(sams_tcp_socket, &SAMS_TCP_time, displacement_SAMS_t0, rotation_matrix_SAMS);
-		if (iResult == 0) // This happens if SIMA simulates more timesteps than SAMS
+		if (iResult == 0)
 		{
-			printf("Warning: SAMS connection is closed\n");
-			(*ierr)++;
+			printf("Error: SAMS connection is closed\n");
+			*ierr = -36;
+			return;
 		}
 		else if (iResult < 0)
 		{
@@ -659,19 +653,20 @@ void CAL_CONV gfexfo_
 	}
 
 	// Transform the sea forces from SIMA global coordinate system to SAMS local
+	double coupling_magnitude = 0.0015;
 	for (int i = 0;i < 3;i++)
 	{
 		F_coupling_SAMS_local[i] = 0;
 		F_coupling_SAMS_local[3 + i] = 0;
-		if (false) // TODO remove condition when you are confident about sending the coupling forces
+		if (true) // false for decoupled simulation, true for coupled
 		{
 			for (int j = 0;j < 3;j++)
 			{
-				F_coupling_SAMS_local[i] += rotation_matrix_SAMS[j][i] * F_coupling_SIMA_global[j];
-				F_coupling_SAMS_local[3 + i] += rotation_matrix_SAMS[j][i] * F_coupling_SIMA_global[3 + j];
+				// TODO for now, apply just a fraction of the coupling force
+				F_coupling_SAMS_local[i] += rotation_matrix_SAMS[j][i] * F_coupling_SIMA_global[j] * coupling_magnitude;
+				F_coupling_SAMS_local[3 + i] += rotation_matrix_SAMS[j][i] * F_coupling_SIMA_global[3 + j] * coupling_magnitude;
 			}
 		}
-		
 	}
 
 	// Send coupling forces to SAMS
