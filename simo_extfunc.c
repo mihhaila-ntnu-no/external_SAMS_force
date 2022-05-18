@@ -164,7 +164,7 @@ void CAL_CONV gfexfo_
 	double rotation_matrix_SAMS_SIMA[3][3] = { {1,0,0},{0,-1,0},{0,0,-1} }; // From SIMA global to SAMS global
 
 	double F_coupling_inertial[6]; // [N, N*m] Inertial force necessary for the SAMS structure to catch up
-	double F_coupling_hydrostatic[6]; // [N, N*m] Restoring force necessary for the SAMS structure to catch up
+	double F_SAMS_hydrostatic[6]; // [N, N*m] Restoring force predicted to act on the SAMS structure
 	double F_coupling_SIMA_global[6]; // [N, N*m] Total force necessary for the SAMS structure to catch up
 	double F_coupling_SAMS_local[6]; // [N, N*m] Same, but in the SAMS structure local coordinate frame
 	double F_ice_SIMA_global[6] = { 0,0,0,0,0,0 }; // [N, N*m]
@@ -481,6 +481,7 @@ void CAL_CONV gfexfo_
 				return;
 			}
 			sprintf(SAMS_basename_date_mask, "%s_ %%2d%%2d%%4d_%%6d", SAMS_basename);
+			// TODO if the current simulation is called "sim" and there are .txt files from a previous "sim_ice", this will fail
 			do
 			{
 				newer_result_found = 0;
@@ -496,6 +497,7 @@ void CAL_CONV gfexfo_
 				if (iResult != 4)
 				{
 					printf("Error parsing timestamps from SAMS result files\n");
+					printf("From the SAMS result folder, try removing any .txt files not related to this simulation\n");
 					*ierr = 1;
 					return;
 				}
@@ -565,7 +567,9 @@ void CAL_CONV gfexfo_
 			double rotation_velocity_positive_jump;
 			double rotation_acceleration_negative_jump;
 			double rotation_acceleration_positive_jump;
-			// Calculate translational velocities and accelerations as backward finite differences of displacement.
+			// Calculate translational velocities as (currently backward) finite differences of displacement.
+			// Calculate translational accelerations as finite differences of displacement.
+			// Using 3 points, the finite difference coefficients are equal for backward, central, and forward
 			// In the simulation beginning, unknown values are assumed 0
 			coupling_velocity[i] =
 				(
@@ -614,10 +618,10 @@ void CAL_CONV gfexfo_
 		for (int i = 0;i < 6;i++)
 		{
 			F_coupling_inertial[i] = coupling_acceleration[i] * mass_matrix_SAMS[i][i];
-			F_coupling_hydrostatic[i] =
-				(stiffness_reference_SIMA[i] - displacement_SIMA_t0.double_precision[i])
+			F_SAMS_hydrostatic[i] =
+				(stiffness_reference_SIMA[i] - displacement_SAMS_tm1[i])
 				* stiffness_matrix_SIMA[i][i];
-			F_coupling_SIMA_global[i] = F_coupling_inertial[i] + F_coupling_hydrostatic[i];
+			F_coupling_SIMA_global[i] = F_coupling_inertial[i] + F_SAMS_hydrostatic[i];
 		}
 		// Make a prediction about the position of the SAMS structure
 	}
@@ -653,7 +657,7 @@ void CAL_CONV gfexfo_
 	}
 
 	// Transform the sea forces from SIMA global coordinate system to SAMS local
-	double coupling_magnitude = 0.0015;
+	double coupling_magnitude = 0.03;
 	for (int i = 0;i < 3;i++)
 	{
 		F_coupling_SAMS_local[i] = 0;
@@ -662,9 +666,9 @@ void CAL_CONV gfexfo_
 		{
 			for (int j = 0;j < 3;j++)
 			{
-				// TODO for now, apply just a fraction of the coupling force
+				// TODO for now, apply just a fraction of the translational coupling force
 				F_coupling_SAMS_local[i] += rotation_matrix_SAMS[j][i] * F_coupling_SIMA_global[j] * coupling_magnitude;
-				F_coupling_SAMS_local[3 + i] += rotation_matrix_SAMS[j][i] * F_coupling_SIMA_global[3 + j] * coupling_magnitude;
+				// F_coupling_SAMS_local[3 + i] += rotation_matrix_SAMS[j][i] * F_coupling_SIMA_global[3 + j] * coupling_magnitude;
 			}
 		}
 	}
@@ -814,7 +818,13 @@ void CAL_CONV gfexfo_
 			"F_ice_global_2",
 			"F_ice_global_3",
 			"F_ice_global_4",
-			"F_ice_global_5"
+			"F_ice_global_5",
+			"F_ice_local_0",
+			"F_ice_local_1",
+			"F_ice_local_2",
+			"F_ice_local_3",
+			"F_ice_local_4",
+			"F_ice_local_5"
 		};
 		nr_of_csv_ints = (int)sizeof(csv_ints_header) / sizeof(csv_ints_header[0]);
 		nr_of_csv_floats = (int)sizeof(csv_floats_header) / sizeof(csv_floats_header[0]);
@@ -906,12 +916,12 @@ void CAL_CONV gfexfo_
 			F_coupling_inertial[3],
 			F_coupling_inertial[4],
 			F_coupling_inertial[5],
-			F_coupling_hydrostatic[0],
-			F_coupling_hydrostatic[1],
-			F_coupling_hydrostatic[2],
-			F_coupling_hydrostatic[3],
-			F_coupling_hydrostatic[4],
-			F_coupling_hydrostatic[5],
+			F_SAMS_hydrostatic[0],
+			F_SAMS_hydrostatic[1],
+			F_SAMS_hydrostatic[2],
+			F_SAMS_hydrostatic[3],
+			F_SAMS_hydrostatic[4],
+			F_SAMS_hydrostatic[5],
 			displacement_SAMS_t0[0],
 			displacement_SAMS_t0[1],
 			displacement_SAMS_t0[2],
@@ -941,7 +951,13 @@ void CAL_CONV gfexfo_
 			F_ice_SIMA_global[2],
 			F_ice_SIMA_global[3],
 			F_ice_SIMA_global[4],
-			F_ice_SIMA_global[5]
+			F_ice_SIMA_global[5],
+			F_ice_SIMA_local[0],
+			F_ice_SIMA_local[1],
+			F_ice_SIMA_local[2],
+			F_ice_SIMA_local[3],
+			F_ice_SIMA_local[4],
+			F_ice_SIMA_local[5]
 		};
 		CsvWriter_nextRow(csv_writer);
 		char field_buffer[100];
