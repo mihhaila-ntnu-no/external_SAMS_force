@@ -38,12 +38,12 @@ void CAL_CONV gfexfo_
 	int* ierr
 )
 {
-	static int run_counter;
+	static int run_counter; // For debugging
 	run_counter++;
 	// *ierr will be incremented in case of a warning, so at the end of execution the warnings can be counted
 	// In case of an error, *ierr will be set to a negative value and gfexfo_() will return
 	// The error values decrease sequentially as they appear in the code, but this hasn't shown up in SIMA so far
-	// Lowest used value: -36
+	// Lowest used value: -38
 	*ierr = 0;
 
 	// TODO try simulating with more than 1 substep, is dt referring to the length of one step or substep?
@@ -64,6 +64,7 @@ void CAL_CONV gfexfo_
 	// TODO go over iinfo[] and return zero forces for any unexpected values. Then clean up the .csv
 	
 	// The following arrays, declared as floats above, are in fact doubles spread over float pairs
+	// TODO move this conversion out to a function, would improve readability a lot
 	union
 	{
 		float single_precision[MGAMMA];
@@ -148,15 +149,23 @@ void CAL_CONV gfexfo_
 	size_t line_buffer_size = 0; // for getline()
 	char* gfexfo_result_file_name = "gfexfo_sams.csv";
 	char itconfig_file_path[MCHEXT]; // Also used to get the SAMS simulation name
+	bool send_ice_forces_to_SIMA = true; // Control coupling/decoupling from here
+	bool send_catchup_forces_to_SAMS = true;
 
 	double timestep_start_time = 0; // [s]
 	double timestep_end_time = 0; // [s]
 	double SAMS_TCP_time; // [s]
 	double SAMS_txt_time = 0; // [s]
 
-	double coupling_acceleration[6]; // [m/s^2, rad/s^2] Acceleration necessary for the SAMS structure to catch up
+	double coupling_acceleration_for_constant_acc[6]; // [m/s^2, rad/s^2] Acceleration necessary for the SAMS structure to catch up
+	double coupling_acceleration_for_impulse[6]; // Same, but not actually acceleration, just impulse spread over a timestep
 	double coupling_velocity[6];
-	double displacement_SAMS_t0[6]; // [m, rad]
+	double displacement_SAMS_t0[6]; // [m, rad] Received through TCP
+	double constant_acc_displacement_prediction[3]; // Prediction for SAMS displacement, if it were using constant initial acceleration
+	double impulse_displacement_prediction[3]; // Prediction for SAMS displacement, if it were using impulse scheme
+	double constant_acc_error[3];
+	double impulse_error[3];
+	double velocity_SAMS_tm1[3]; // [m/s] Backwards finite difference
 
 	// Matrix describes rotation from global to local: X_global = M x X_local
 	double rotation_matrix_SIMA[3][3]; // From SIMA global to SIMA local
@@ -165,9 +174,11 @@ void CAL_CONV gfexfo_
 
 	double F_coupling_inertial[6]; // [N, N*m] Inertial force necessary for the SAMS structure to catch up
 	double F_SAMS_hydrostatic[6]; // [N, N*m] Restoring force predicted to act on the SAMS structure
-	double F_coupling_SIMA_global[6]; // [N, N*m] Total force necessary for the SAMS structure to catch up
+	double F_coupling_constant_acc_SIMA_global[6]; // [N, N*m] Total force necessary for the SAMS structure to catch up
+	double F_coupling_impulse_SIMA_global[6];
 	double F_coupling_SAMS_local[6]; // [N, N*m] Same, but in the SAMS structure local coordinate frame
 	double F_ice_SIMA_global[6] = { 0,0,0,0,0,0 }; // [N, N*m]
+	
 	
 	// Simulation setup. Read and assume information.
 	if (substep_nr_overall == 1)
@@ -530,9 +541,24 @@ void CAL_CONV gfexfo_
 			sprintf(SAMS_resultfile_path, "%s%s", SAMS_resultfolder_path, SAMS_resultfile_name_latest);
 		}
 		// TODO check for differences in water and air densities between .itconfig and function arguments
+		printf("Sending ice forces to SIMA is ");
+		if (send_ice_forces_to_SIMA)
+			printf("enabled\n");
+		else
+			printf("disabled\n");
+		printf("Forcing SAMS displacements is ");
+		if (send_catchup_forces_to_SAMS)
+			printf("enabled\n");
+		else
+			printf("disabled\n");
 	};
 
-	// Calculate kinematic state, global->body transformation matrix, state-dependent forces, sea forces
+	// Rename the sequential angular displacements for clarity
+	double phi = displacement_SIMA_t0.double_precision[3];
+	double theta = displacement_SIMA_t0.double_precision[4];
+	double psi = displacement_SIMA_t0.double_precision[5];
+
+	// Clarify time, calculate global->body transformation matrix
 	{
 		if (called_by_RIFLEX)
 		{
@@ -546,11 +572,8 @@ void CAL_CONV gfexfo_
 			timestep_start_time = rinfo[0] - dt;
 			timestep_end_time = rinfo[0];
 		}
-		// Rename the sequential angular displacements for clarity
-		double phi = displacement_SIMA_t0.double_precision[3];
-		double theta = displacement_SIMA_t0.double_precision[4];
-		double psi = displacement_SIMA_t0.double_precision[5];
-		// Calculate the global -> body coordinate rotation matrix
+		
+		// Calculate the SIMA global -> SIMA body coordinate rotation matrix
 		rotation_matrix_SIMA[0][0] = cos(psi) * cos(theta);
 		rotation_matrix_SIMA[0][1] = -sin(psi) * cos(phi) + cos(psi) * sin(theta) * sin(phi);
 		rotation_matrix_SIMA[0][2] = sin(psi) * sin(phi) + cos(psi) * sin(theta) * cos(phi);
@@ -560,72 +583,8 @@ void CAL_CONV gfexfo_
 		rotation_matrix_SIMA[2][0] = -sin(theta);
 		rotation_matrix_SIMA[2][1] = cos(theta) * sin(phi);
 		rotation_matrix_SIMA[2][2] = cos(theta) * cos(phi);
-		// Calculate kinematic state in SIMA global coordinates from displacement history
-		for (int i = 0;i < 3;i++)
-		{
-			double rotation_velocity_negative_jump;
-			double rotation_velocity_positive_jump;
-			double rotation_acceleration_negative_jump;
-			double rotation_acceleration_positive_jump;
-			// Calculate translational velocities as (currently backward) finite differences of displacement.
-			// Calculate translational accelerations as finite differences of displacement.
-			// Using 3 points, the finite difference coefficients are equal for backward, central, and forward
-			// In the simulation beginning, unknown values are assumed 0
-			coupling_velocity[i] =
-				(
-					-displacement_SAMS_tm1[i]
-					+ displacement_SIMA_t0.double_precision[i]
-					) / dt;
-			coupling_acceleration[i] =
-				(
-					displacement_SAMS_tm2[i]
-					- 2 * displacement_SAMS_tm1[i]
-					+ displacement_SIMA_t0.double_precision[i]
-					) / pow(dt, 2);
-			// Calculate rotational velocities and accelerations, check for 0-360 = 0-2pi transition jump
-			coupling_velocity[3 + i] =
-				(
-					-displacement_SAMS_tm1[3 + i]
-					+ displacement_SIMA_t0.double_precision[3 + i]
-					) / dt;
-			rotation_velocity_negative_jump = coupling_velocity[3 + i] - 2 * M_PI / dt;
-			rotation_velocity_positive_jump = coupling_velocity[3 + i] + 2 * M_PI / dt;
-			if (abs(coupling_velocity[3 + i]) > abs(rotation_velocity_negative_jump))
-				coupling_velocity[3 + i] = rotation_velocity_negative_jump;
-			if (abs(coupling_velocity[3 + i]) > abs(rotation_velocity_positive_jump))
-				coupling_velocity[3 + i] = rotation_velocity_positive_jump;
-			// TODO these are rotational joint velocities, each of them has its own coordinate frame
-			// This method of finding the accelerations neglects the fact that the coordinate frames change over dt
-			// Rather, the joint velocities should be converted to a angular velocity vector in the global frame
-			// Then, will its derivative be equal to an acceleration vector? Maybe, check literature
-			// TODO a Google search even suggests that the acceleration vector could be found by differentiating the rotation matrix
-			// With small angles, the rotational joint velocities are very close to the global-frame angular velocities
-			// All this shown on paper notes, page 9
-			coupling_acceleration[3 + i] =
-				(
-					displacement_SAMS_tm2[3 + i]
-					- 2 * displacement_SAMS_tm1[3 + i]
-					+ displacement_SIMA_t0.double_precision[3 + i]
-					) / pow(dt, 2);
-			rotation_acceleration_negative_jump = coupling_acceleration[3 + i] - 2 * M_PI / pow(dt, 2);
-			rotation_acceleration_positive_jump = coupling_acceleration[3 + i] + 2 * M_PI / pow(dt, 2);
-			if (abs(coupling_acceleration[3 + i]) > abs(rotation_acceleration_negative_jump))
-				coupling_acceleration[3 + i] = rotation_acceleration_negative_jump;
-			if (abs(coupling_acceleration[3 + i]) > abs(rotation_acceleration_positive_jump))
-				coupling_acceleration[3 + i] = rotation_acceleration_positive_jump;
-		}
-		// Calculate coupling force necessary for SAMS to catch up, in global coordinates
-		for (int i = 0;i < 6;i++)
-		{
-			F_coupling_inertial[i] = coupling_acceleration[i] * mass_matrix_SAMS[i][i];
-			F_SAMS_hydrostatic[i] =
-				(stiffness_reference_SIMA[i] - displacement_SAMS_tm1[i])
-				* stiffness_matrix_SIMA[i][i];
-			F_coupling_SIMA_global[i] = F_coupling_inertial[i] + F_SAMS_hydrostatic[i];
-		}
-		// Make a prediction about the position of the SAMS structure
 	}
-	
+
 	// Receive TCP data from SAMS
 	{
 		if (sams_tcp_socket == INVALID_SOCKET)
@@ -634,7 +593,7 @@ void CAL_CONV gfexfo_
 			*ierr = -16;
 			return;
 		}
-		iResult = receive_from_SAMS(sams_tcp_socket, &SAMS_TCP_time, displacement_SAMS_t0, rotation_matrix_SAMS);
+		iResult = receive_from_SAMS(sams_tcp_socket, &SAMS_TCP_time, displacement_SAMS_tm1, rotation_matrix_SAMS);
 		if (iResult == 0)
 		{
 			printf("Error: SAMS connection is closed\n");
@@ -656,22 +615,116 @@ void CAL_CONV gfexfo_
 		// TODO express the difference between SAMS and SIMA rotation matrices, define a maximum value (1%?)
 	}
 
+	// Calculate force for prescribing SAMS location
+	{
+		// Calculate translational kinematic state in SIMA global coordinates from displacement history
+		for (int i = 0;i < 3;i++)
+		{
+			// Calculate translational velocities as (currently backward) finite differences of displacement.
+			// Not used anywhere at the time of writing this comment
+			coupling_velocity[i] =
+				(
+					-displacement_SAMS_tm1[i]
+					+ displacement_SIMA_t0.double_precision[i]
+					) / dt;
+			// Calculate translational accelerations as finite differences of displacement.
+			// Using 3 points, the finite difference coefficients are equal for backward, central, and forward
+			// In the simulation beginning, unknown values are assumed 0
+			coupling_acceleration_for_constant_acc[i] =
+				(
+					displacement_SAMS_tm2[i]
+					- 2 * displacement_SAMS_tm1[i]
+					+ displacement_SIMA_t0.double_precision[i]
+					) / pow(dt, 2);
+			// SAMS will integrate any force it receives into an impulse
+			// Thus, the two-point pseudo-acceleration should be calculated instead of the three-point central difference
+			// See notebook, 22.05.2021, pp.1,2
+			coupling_acceleration_for_impulse[i] =
+				(
+					-displacement_SAMS_tm1[i]
+					+ displacement_SIMA_t0.double_precision[i]
+					) / pow(dt, 2);
+		}
+		double rotation_velocity_negative_jump;
+		double rotation_velocity_positive_jump;
+		double rotation_acceleration_negative_jump;
+		double rotation_acceleration_positive_jump;
+		double joint_rotation_velocity[6]; // TODO There are only three
+		// Calculate rotational joint velocities, check for 0-360 = 0-2pi transition jump
+		for (int i = 0;i < 3;i++)
+		{
+
+			joint_rotation_velocity[3 + i] =
+				(
+					-displacement_SAMS_tm1[3 + i]
+					+ displacement_SIMA_t0.double_precision[3 + i]
+					) / dt;
+			rotation_velocity_negative_jump = joint_rotation_velocity[3 + i] - 2 * M_PI / dt;
+			rotation_velocity_positive_jump = joint_rotation_velocity[3 + i] + 2 * M_PI / dt;
+			if (abs(joint_rotation_velocity[3 + i]) > abs(rotation_velocity_negative_jump))
+				joint_rotation_velocity[3 + i] = rotation_velocity_negative_jump;
+			if (abs(joint_rotation_velocity[3 + i]) > abs(rotation_velocity_positive_jump))
+				joint_rotation_velocity[3 + i] = rotation_velocity_positive_jump;
+		}
+		// Rename joint rotation velocities for clarity
+		double phi_dot = joint_rotation_velocity[3];
+		double theta_dot = joint_rotation_velocity[4];
+		double psi_dot = joint_rotation_velocity[5];
+		// Convert joint rotation velocities to angular velocities in the SIMA global frame
+		coupling_velocity[3] = phi_dot * (cos(psi) * cos(theta) - sin(psi));
+		coupling_velocity[4] = theta_dot * (sin(psi) * cos(theta) - cos(psi));
+		coupling_velocity[5] = psi_dot * (1 - sin(theta));
+		// Derivation in notebook, dated 21.05.2022, pages 1 and 2
+		for (int i = 0;i < 3;i++)
+		{
+			// This method of finding the rotational accelerations neglects the fact that the coordinate frames change over dt
+			// Rather, the joint velocities should be converted to a angular velocity vector in the global frame
+			// Then, will its derivative be equal to an acceleration vector? Maybe, check literature
+			// TODO a Google search even suggests that the acceleration vector could be found by differentiating the rotation matrix
+			coupling_acceleration_for_constant_acc[3 + i] =
+				(
+					displacement_SAMS_tm2[3 + i]
+					- 2 * displacement_SAMS_tm1[3 + i]
+					+ displacement_SIMA_t0.double_precision[3 + i]
+					) / pow(dt, 2);
+			rotation_acceleration_negative_jump = coupling_acceleration_for_constant_acc[3 + i] - 2 * M_PI / pow(dt, 2);
+			rotation_acceleration_positive_jump = coupling_acceleration_for_constant_acc[3 + i] + 2 * M_PI / pow(dt, 2);
+			if (abs(coupling_acceleration_for_constant_acc[3 + i]) > abs(rotation_acceleration_negative_jump))
+				coupling_acceleration_for_constant_acc[3 + i] = rotation_acceleration_negative_jump;
+			if (abs(coupling_acceleration_for_constant_acc[3 + i]) > abs(rotation_acceleration_positive_jump))
+				coupling_acceleration_for_constant_acc[3 + i] = rotation_acceleration_positive_jump;
+		}
+		// Calculate coupling force necessary for SAMS to catch up, in global coordinates
+		for (int i = 0;i < 6;i++)
+		{
+			// Here the choice is made, whether to use the true acceleration or just impulse over a timestep
+			F_SAMS_hydrostatic[i] =
+				(stiffness_reference_SIMA[i] - displacement_SAMS_tm1[i])
+				* stiffness_matrix_SIMA[i][i];
+			F_coupling_constant_acc_SIMA_global[i] = coupling_acceleration_for_constant_acc[i] * mass_matrix_SAMS[i][i] + F_SAMS_hydrostatic[i]; // the 2* not explained yet
+			F_coupling_impulse_SIMA_global[i] = coupling_acceleration_for_impulse[i] * mass_matrix_SAMS[i][i] + F_SAMS_hydrostatic[i];
+		}
+	}
+
+
 	// Transform the sea forces from SIMA global coordinate system to SAMS local
-	double coupling_magnitude = 0.03;
+	double coupling_magnitude = 1;
 	for (int i = 0;i < 3;i++)
 	{
 		F_coupling_SAMS_local[i] = 0;
 		F_coupling_SAMS_local[3 + i] = 0;
-		if (true) // false for decoupled simulation, true for coupled
+		if (send_catchup_forces_to_SAMS) // false for decoupled simulation, true for coupled
 		{
 			for (int j = 0;j < 3;j++)
 			{
 				// TODO for now, apply just a fraction of the translational coupling force
-				F_coupling_SAMS_local[i] += rotation_matrix_SAMS[j][i] * F_coupling_SIMA_global[j] * coupling_magnitude;
+				F_coupling_SAMS_local[i] += rotation_matrix_SAMS[j][i] * F_coupling_constant_acc_SIMA_global[j] * coupling_magnitude;
 				// F_coupling_SAMS_local[3 + i] += rotation_matrix_SAMS[j][i] * F_coupling_SIMA_global[3 + j] * coupling_magnitude;
 			}
 		}
 	}
+	if (substep_nr_overall == 15)
+		F_coupling_SAMS_local[0] = 100000;
 
 	// Send coupling forces to SAMS
 	if (send_to_SAMS(sams_tcp_socket, timestep_start_time, F_coupling_SAMS_local) == SOCKET_ERROR)
@@ -683,7 +736,7 @@ void CAL_CONV gfexfo_
 		return;
 	}
 
-	// Read ice forces from the SAMS result .txt file
+	// Read displacement and ice forces from the SAMS result .txt file
 	{
 		// For SIMO simulations, the i=0, t=0.0 line will not be written. Skip reading it
 		iResult = read_from_SAMS
@@ -692,6 +745,7 @@ void CAL_CONV gfexfo_
 			substep_nr_overall,
 			nr_of_substeps_overall,
 			&SAMS_txt_time,
+			displacement_SAMS_t0,
 			F_ice_SIMA_global
 		);
 		if (iResult < 0)
@@ -707,17 +761,63 @@ void CAL_CONV gfexfo_
 		}
 	}
 
+	// Check if SAMS moved to the prescribed position
+	// TODO only check if the ice forces were zero
+	{
+		// Make a prediction about kinematic state of the SAMS structure at t=0
+		double acceleration_SAMS_t0[3];
+		double constant_acc_velocity_prediction[3];
+		double impulse_velocity_prediction[3];
+		double impulse_SAMS_t0[3];
+		for (int i = 0;i < 3;i++)
+		{
+			velocity_SAMS_tm1[i] = (-displacement_SAMS_tm2[i] + displacement_SAMS_tm1[i]) / dt;
+			// Where would SAMS end up if it were using constant initial acceleration?
+			acceleration_SAMS_t0[i] = F_coupling_constant_acc_SIMA_global[i] / mass_matrix_SAMS[i][i];
+			constant_acc_velocity_prediction[i] = velocity_SAMS_tm1[i] + acceleration_SAMS_t0[i] * dt;
+			constant_acc_displacement_prediction[i] = displacement_SAMS_tm1[i] + (velocity_SAMS_tm1[i] + constant_acc_velocity_prediction[i]) / 2 * dt;
+			// Where would SAMS end up if it were using impulse?
+			impulse_SAMS_t0[i] = F_coupling_constant_acc_SIMA_global[i] * dt;
+			impulse_velocity_prediction[i] = velocity_SAMS_tm1[i] + impulse_SAMS_t0[i] / mass_matrix_SAMS[i][i];
+			impulse_displacement_prediction[i] = displacement_SAMS_tm1[i] + impulse_velocity_prediction[i] * dt;
+		}
+		
+		for (int i = 0;i < 3;i++)
+		{
+			break; // TODO temporarily don't care about this error
+			// In case the current displacement is zero, avoid zero-division and just save the absolute error.
+			// This will result in 10 cm being treated equally to an error of 1%
+			constant_acc_error[i] = (constant_acc_displacement_prediction[i]- displacement_SAMS_t0[i]) / ((displacement_SAMS_t0[i] == 0) ? 1 : displacement_SAMS_t0[i])  ;
+			impulse_error[i] = (impulse_displacement_prediction[i]- displacement_SAMS_t0[i]) / ((displacement_SAMS_t0[i] == 0) ? 1 : displacement_SAMS_t0[i]);
+			if (constant_acc_error[i] > 0.1)
+			{
+				printf("Error: Constant-initial-acceleration prediction of SAMS displacement in direction %d was off by %f\n",i,constant_acc_error[i]);
+				*ierr = -37;
+				return;
+			}
+			if (constant_acc_error[i] > 0.1)
+			{
+				printf("Error: Impulse-based prediction of SAMS displacement in direction %d was off by %f\n",i, impulse_error[i]);
+				*ierr = -38;
+				return;
+			}
+		}
+	}
+
 	// Save the ice forces to SIMA's memory for the next timestep
 	for (int i = 0;i < 3;i++)
 	{
 		F_ice_SIMA_local[i] = 0; // [kN] surge, sway, heave
 		F_ice_SIMA_local[3 + i] = 0; // [MN*m] roll, pitch, yaw
 		// Transform the ice forces from SIMA global to SIMA local coordinate frame
-		for (int j = 0;j < 3;j++)
+		if (send_ice_forces_to_SIMA) // false for decoupled simulation, true for coupled
 		{
-			// TODO check ICOORD, switch between transforming and not transforming. the setting is in the DLL force part of the GUI
-			F_ice_SIMA_local[i] += rotation_matrix_SIMA[j][i] * F_ice_SIMA_global[j] / 1000; // N -> kN
-			F_ice_SIMA_local[3 + i] += rotation_matrix_SIMA[j][i] * F_ice_SIMA_global[3 + j] / 1000000; // N*m -> MN*m
+			for (int j = 0;j < 3;j++)
+			{
+				// TODO check ICOORD, switch between transforming and not transforming. the setting is in the DLL force part of the GUI
+				F_ice_SIMA_local[i] += rotation_matrix_SIMA[j][i] * F_ice_SIMA_global[j] / 1000; // N -> kN
+				F_ice_SIMA_local[3 + i] += rotation_matrix_SIMA[j][i] * F_ice_SIMA_global[3 + j] / 1000000; // N*m -> MN*m
+			}
 		}
 		// Save ice forces to SIMA memory
 		stor[i] = F_ice_SIMA_local[i];
@@ -761,6 +861,7 @@ void CAL_CONV gfexfo_
 			"stor_7",
 			"stor_8"
 		};
+		// TODO after controlling programmatically for units, write them in the column headers
 		char* csv_doubles_header[] =
 		{
 			"timestep_start_time",
@@ -777,24 +878,36 @@ void CAL_CONV gfexfo_
 			"coupling_acceleration_3",
 			"coupling_acceleration_4",
 			"coupling_acceleration_5",
-			"F_coupling_inertial_0",
-			"F_coupling_inertial_1",
-			"F_coupling_inertial_2",
-			"F_coupling_inertial_3",
-			"F_coupling_inertial_4",
-			"F_coupling_inertial_5",
 			"F_coupling_hydrostatic_0",
 			"F_coupling_hydrostatic_1",
 			"F_coupling_hydrostatic_2",
 			"F_coupling_hydrostatic_3",
 			"F_coupling_hydrostatic_4",
 			"F_coupling_hydrostatic_5",
-			"displacement_SAMS_0",
-			"displacement_SAMS_1",
-			"displacement_SAMS_2",
-			"displacement_SAMS_3",
-			"displacement_SAMS_4",
-			"displacement_SAMS_5",
+			"displacement_SAMS_t0_0",
+			"displacement_SAMS_t0_1",
+			"displacement_SAMS_t0_2",
+			"displacement_SAMS_t0_3",
+			"displacement_SAMS_t0_4",
+			"displacement_SAMS_t0_5",
+			"displacement_SAMS_tm1_0",
+			"displacement_SAMS_tm1_1",
+			"displacement_SAMS_tm1_2",
+			"velocity_SAMS_tm1_0",
+			"velocity_SAMS_tm1_1",
+			"velocity_SAMS_tm1_2",
+			"constant_acc_displacement_prediction_0",
+			"constant_acc_displacement_prediction_1",
+			"constant_acc_displacement_prediction_2",
+			"impulse_displacement_prediction_0",
+			"impulse_displacement_prediction_1",
+			"impulse_displacement_prediction_2",
+			"constant_acc_error_0",
+			"constant_acc_error_1",
+			"constant_acc_error_2",
+			"impulse_error_0",
+			"impulse_error_1",
+			"impulse_error_2",
 			"rotation_matrix_SIMA_0_0",
 			"rotation_matrix_SIMA_0_1",
 			"rotation_matrix_SIMA_0_2",
@@ -904,18 +1017,12 @@ void CAL_CONV gfexfo_
 			displacement_SIMA_t0.double_precision[3],
 			displacement_SIMA_t0.double_precision[4],
 			displacement_SIMA_t0.double_precision[5],
-			coupling_acceleration[0],
-			coupling_acceleration[1],
-			coupling_acceleration[2],
-			coupling_acceleration[3],
-			coupling_acceleration[4],
-			coupling_acceleration[5],
-			F_coupling_inertial[0],
-			F_coupling_inertial[1],
-			F_coupling_inertial[2],
-			F_coupling_inertial[3],
-			F_coupling_inertial[4],
-			F_coupling_inertial[5],
+			coupling_acceleration_for_constant_acc[0],
+			coupling_acceleration_for_constant_acc[1],
+			coupling_acceleration_for_constant_acc[2],
+			coupling_acceleration_for_constant_acc[3],
+			coupling_acceleration_for_constant_acc[4],
+			coupling_acceleration_for_constant_acc[5],
 			F_SAMS_hydrostatic[0],
 			F_SAMS_hydrostatic[1],
 			F_SAMS_hydrostatic[2],
@@ -928,6 +1035,24 @@ void CAL_CONV gfexfo_
 			displacement_SAMS_t0[3],
 			displacement_SAMS_t0[4],
 			displacement_SAMS_t0[5],
+			displacement_SAMS_tm1[0],
+			displacement_SAMS_tm1[1],
+			displacement_SAMS_tm1[2],
+			velocity_SAMS_tm1[0],
+			velocity_SAMS_tm1[1],
+			velocity_SAMS_tm1[2],
+			constant_acc_displacement_prediction[0],
+			constant_acc_displacement_prediction[1],
+			constant_acc_displacement_prediction[2],
+			impulse_displacement_prediction[0],
+			impulse_displacement_prediction[1],
+			impulse_displacement_prediction[2],
+			constant_acc_error[0],
+			constant_acc_error[1],
+			constant_acc_error[2],
+			impulse_error[0],
+			impulse_error[1],
+			impulse_error[2],
 			rotation_matrix_SIMA[0][0],
 			rotation_matrix_SIMA[0][1],
 			rotation_matrix_SIMA[0][2],
@@ -1037,7 +1162,6 @@ void CAL_CONV gfexfo_
 	for (int i = 0; i < 6; i++)
 	{
 		displacement_SAMS_tm2[i] = displacement_SAMS_tm1[i];
-		displacement_SAMS_tm1[i] = displacement_SAMS_t0[i];
 	}
 
 	free(line_buffer); // Not clear why I have to free this and not everything else
@@ -1117,8 +1241,13 @@ int send_to_SAMS(SOCKET sams_tcp_socket, double time, double central_forces[6])
 	return send(sams_tcp_socket, GFEXFO_to_SAMS.character_array, sizeof(GFEXFO_to_SAMS.double_precision), 0);
 }
 
-int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_time, double displacement_SAMS[6], double rotation_matrix_SAMS[3][3])
+int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_TCP_time, double displacement_SAMS_tm1[6], double rotation_matrix_SAMS[3][3])
 {
+	// The SAMS exchange happens at the beginning of each timestep.
+	// From SAMS, the kinematic state is sent corresponding to the beginning of the timestep
+	// There are also some forces sent, which are likely the ones that were acting on the previous timestep
+	// In return, SAMS expects to receive external forces that will act on this timestep
+	
 	// Decode a bytestring from SAMS into doubles
 	union
 	{
@@ -1129,7 +1258,7 @@ int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_time, double displace
 	int iResult = recv(sams_tcp_socket, SAMS_to_GFEXFO.character_array, sizeof(SAMS_to_GFEXFO.double_precision), 0);
 	if (iResult <= 0)
 		return iResult;
-	*SAMS_time = SAMS_to_GFEXFO.double_precision[0];
+	*SAMS_TCP_time = SAMS_to_GFEXFO.double_precision[0];
 	// Rename the Euler axis components and the Euler angle for clarity
 	double e1 = SAMS_to_GFEXFO.double_precision[4];
 	double e2 = SAMS_to_GFEXFO.double_precision[5];
@@ -1138,7 +1267,7 @@ int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_time, double displace
 	// Check for NaN values
 	if (isnan(e1) || isnan(e2) || isnan(e3) || isnan(theta_euler))
 	{
-		printf("Error at timestep %.1f: axis-angle orientation from SAMS contains bad values\n",*SAMS_time);
+		printf("Error at timestep %.1f: axis-angle orientation from SAMS contains bad values\n",*SAMS_TCP_time);
 		printf("Euler axis: %f %f %f\n", e1, e2, e3);
 		printf("Euler angle: %f\n", theta_euler);
 		return -1;
@@ -1167,23 +1296,24 @@ int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_time, double displace
 	// Return the SAMS global displacement vector in the SIMA global coordinate frame
 	for (int i = 0;i < 3;i++)
 	{
-		displacement_SAMS[i] = 0;
+		displacement_SAMS_tm1[i] = 0;
 		for (int j = 0;j < 3;j++)
-			displacement_SAMS[i] += rotation_matrix_SAMS_SIMA[i][j] * SAMS_to_GFEXFO.double_precision[1 + j];
+			displacement_SAMS_tm1[i] += rotation_matrix_SAMS_SIMA[i][j] * SAMS_to_GFEXFO.double_precision[1 + j];
 	}
-	// Convert the Euler axis-angle representation to Tait-Bryan chained Z-Y-X rotations
+	// Convert the Euler axis-angle representation to Tait-Bryan chained Z-Y-X rotations, aka joint rotations
+	// TODO if we are anyway returning the rotation matrix, why bother with the joint rotations
 	double theta_zyx = asin(-rotation_matrix_SAMS[2][0]);
 	double phi_zyx = asin(rotation_matrix_SAMS[2][1] / cos(theta_zyx));
 	double psi_zyx = asin(rotation_matrix_SAMS[1][0] / cos(theta_zyx));
 	// The calculations were analytically derived from the rotation matrix definition in SIMO manual, app.C
-	displacement_SAMS[3] = phi_zyx;
-	displacement_SAMS[4] = theta_zyx;
-	displacement_SAMS[5] = psi_zyx;
+	displacement_SAMS_tm1[3] = phi_zyx;
+	displacement_SAMS_tm1[4] = theta_zyx;
+	displacement_SAMS_tm1[5] = psi_zyx;
 	
 	return iResult;
 }
 
-int read_from_SAMS(char* SAMS_resultfile_path, int substep_nr_overall, int nr_of_substeps_overall, double* SAMS_txt_time, double F_ice_global[6])
+int read_from_SAMS(char* SAMS_resultfile_path, int substep_nr_overall, int nr_of_substeps_overall, double* SAMS_txt_time, double displacement_SAMS_t0[6], double F_ice_global[6])
 {
 	int ierr = 0;
 	char* line_buffer = NULL; // for getline()
@@ -1274,8 +1404,13 @@ int read_from_SAMS(char* SAMS_resultfile_path, int substep_nr_overall, int nr_of
 	{
 		F_ice_global[i] = 0;
 		F_ice_global[3 + i] = 0;
+		displacement_SAMS_t0[i] = 0.;
+		// TODO also return orientation? In what format though, matrix? join rotations? and what for
+		// Right now, the second half of this array will be left uninitialized by this function
+		// TODO could also get the velocities, to avoid calculating them by hand next timestep
 		for (int j = 0;j < 3;j++)
 		{
+			displacement_SAMS_t0[i] += rotation_matrix_SAMS_SIMA[i][j] * SAMS_txt_output[1 + i];
 			// Linear forces are composed of breaking and rubble forces
 			F_ice_global[i] += rotation_matrix_SAMS_SIMA[i][j] * (SAMS_txt_output[20 + i] + SAMS_txt_output[23 + i]);
 			// Rotational forces are given as total torque in SAMS global frame
