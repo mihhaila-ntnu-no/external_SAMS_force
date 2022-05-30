@@ -1256,11 +1256,20 @@ int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_TCP_time, double disp
 	double e3 = SAMS_to_GFEXFO.double_precision[6];
 	double theta_euler = SAMS_to_GFEXFO.double_precision[7];
 	double SAMS_global_to_SAMS_body[3][3];
-	int mResult = get_matrix_from_axis_angle(e1, e2, e3, theta_euler, SIMA_global_to_SAMS_body);
+	int mResult = get_matrix_from_axis_angle(e1, e2, e3, theta_euler, SAMS_global_to_SAMS_body);
 	if (mResult < 0)
 		return mResult;
 	// SAMS has the global Z axis pointing to the ground, SIMA to the sky
 	double SIMA_global_to_SAMS_global[3][3] = { {1,0,0},{0,-1,0},{0,0,-1} };
+	for (int i = 0;i < 3;i++)
+	{
+		for (int j = 0;j < 3;j++)
+		{
+			SIMA_global_to_SAMS_body[i][j] = 0.;
+			for (int k = 0;k < 3;k++)
+				SIMA_global_to_SAMS_body[i][j] += SIMA_global_to_SAMS_global[i][k] * SAMS_global_to_SAMS_body[k][j];
+		}
+	}
 	// Return the SAMS global displacement vector in the SIMA global coordinate frame
 	for (int i = 0;i < 3;i++)
 	{
@@ -1269,7 +1278,7 @@ int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_TCP_time, double disp
 			displacement_SAMS_tm1[i] += SIMA_global_to_SAMS_global[i][j] * SAMS_to_GFEXFO.double_precision[1 + j];
 	}
 	double joint_rotation[3]={0.,0.,0.};
-	get_joint_rotations_from_matrix(SIMA_global_to_SAMS_body, joint_rotation);
+	get_joint_rotations_from_matrix(SAMS_global_to_SAMS_body, joint_rotation);
 	for (int i=0;i<3;i++)
 		displacement_SAMS_tm1[3+i] = joint_rotation[i];
 	return iResult;
@@ -1298,7 +1307,7 @@ int read_from_SAMS(char* SAMS_resultfile_path, int substep_nr_overall, int nr_of
 			return -2;
 		}
 	}
-	int max_wait_ms = 2000;
+	int max_wait_ms = 5000;
 	static int waited_ms = 0;
 	bool starting_over;
 	for (int j = 1;j <= max_wait_ms;j *= 5)
@@ -1364,14 +1373,25 @@ int read_from_SAMS(char* SAMS_resultfile_path, int substep_nr_overall, int nr_of
 	double e2 = SAMS_txt_output[5];
 	double e3 = SAMS_txt_output[6];
 	double theta_euler = SAMS_txt_output[7];
-	double SIMA_global_to_SAMS_body[3][3]; // Describes rotation from SIMA global to SAMS body local at end of timestep
-	int mResult = get_matrix_from_axis_angle(e1, e2, e3, theta_euler, SIMA_global_to_SAMS_body);
-	if (mResult < 0)
-		return mResult;
-	double joint_rotation[3]={0.,0.,0.};
-	get_joint_rotations_from_matrix(SIMA_global_to_SAMS_body, joint_rotation);
 	// Matrix describing rotation from SIMA global to SAMS global
 	double SIMA_global_to_SAMS_global[3][3] = { {1,0,0},{0,-1,0},{0,0,-1} };
+	double SAMS_global_to_SAMS_body[3][3];
+	int mResult = get_matrix_from_axis_angle(e1, e2, e3, theta_euler, SAMS_global_to_SAMS_body);
+	if (mResult < 0)
+		return mResult;
+	double SIMA_global_to_SAMS_body[3][3]; // Describes rotation from SIMA global to SAMS body local at end of timestep
+	for (int i = 0;i < 3;i++)
+	{
+		for (int j = 0;j < 3;j++)
+		{
+			SIMA_global_to_SAMS_body[i][j] = 0.;
+			for (int k = 0;k < 3;k++)
+				SIMA_global_to_SAMS_body[i][j] += SIMA_global_to_SAMS_global[i][k] * SAMS_global_to_SAMS_body[k][j];
+		}
+	}
+	double joint_rotation[3]={0.,0.,0.};
+	get_joint_rotations_from_matrix(SAMS_global_to_SAMS_body, joint_rotation);
+	
 	// Return displacements, velocities, ice forces in the SIMA global coordinate frame
 	for (int i = 0;i < 3;i++)
 	{
@@ -1397,7 +1417,7 @@ int read_from_SAMS(char* SAMS_resultfile_path, int substep_nr_overall, int nr_of
 	return ierr; // 0 if success, negative error code in case of failure, positive count in case of warnings
 }
 
-int get_matrix_from_axis_angle(double e1, double e2, double e3, double theta, double SIMA_global_to_SAMS_body[3][3])
+int get_matrix_from_axis_angle(double e1, double e2, double e3, double theta, double SAMS_global_to_SAMS_body[3][3])
 {
 	int ierr = 0;
 	// Check for NaN values
@@ -1408,7 +1428,6 @@ int get_matrix_from_axis_angle(double e1, double e2, double e3, double theta, do
 		printf("Euler angle: %f\n", theta);
 		return -37;
 	}
-	double SAMS_global_to_SAMS_body[3][3];
 	// Calculate the SAMS global -> SAMS local rotation matrix
 	SAMS_global_to_SAMS_body[0][0] = (1 - cos(theta)) * e1 * e1 + cos(theta);
 	SAMS_global_to_SAMS_body[0][1] = (1 - cos(theta)) * e1 * e2 - e3 * sin(theta);
@@ -1419,29 +1438,20 @@ int get_matrix_from_axis_angle(double e1, double e2, double e3, double theta, do
 	SAMS_global_to_SAMS_body[2][0] = (1 - cos(theta)) * e3 * e1 - e2 * sin(theta);
 	SAMS_global_to_SAMS_body[2][1] = (1 - cos(theta)) * e3 * e2 + e1 * sin(theta);
 	SAMS_global_to_SAMS_body[2][2] = (1 - cos(theta)) * e3 * e3 + cos(theta);
-	// SAMS has the global Z axis pointing to the ground, SIMA to the sky
-	double SAMS_global_to_SIMA_global[3][3] = { {1,0,0},{0,-1,0},{0,0,-1} };
-	// Pre-multiply the SAMS global->local matrix with a 180 degree rotation around global X
-	for (int i = 0;i < 3;i++)
-		for (int j = 0;j < 3;j++)
-		{
-			SIMA_global_to_SAMS_body[i][j] = 0;
-			for (int k = 0;k < 3;k++)
-				SIMA_global_to_SAMS_body[i][j] += SAMS_global_to_SIMA_global[i][k] * SAMS_global_to_SAMS_body[k][j];
-		}
 	return ierr;
 }
 
-int get_joint_rotations_from_matrix(double SIMA_global_to_SAMS_body[3][3], double joint_rotation[3])
+int get_joint_rotations_from_matrix(double SAMS_global_to_SAMS_body[3][3], double joint_rotation[3])
 {
 	int ierr = 0;
 	// Convert the Euler axis-angle representation to Tait-Bryan chained Z-Y-X rotations, aka joint rotations
-	double theta = asin(-SIMA_global_to_SAMS_body[2][0]);
-	double phi = asin(SIMA_global_to_SAMS_body[2][1] / cos(theta));
-	double psi = asin(SIMA_global_to_SAMS_body[1][0] / cos(theta));
+	double theta = asin(-SAMS_global_to_SAMS_body[2][0]);
+	double phi = asin(SAMS_global_to_SAMS_body[2][1] / cos(theta));
+	double psi = asin(SAMS_global_to_SAMS_body[1][0] / cos(theta));
 	// The calculations were analytically derived from the rotation matrix definition in SIMO manual, app.C
-	joint_rotation[0] = -phi; // TODO magic minus sign
-	joint_rotation[1] = theta;
-	joint_rotation[2] = psi;
+	// These joint rotations are given starting from SAMS global frame. Convert to those starting from SIMA global frame
+	joint_rotation[0] = phi;
+	joint_rotation[1] = -theta;
+	joint_rotation[2] = -psi;
 	return ierr;
 }
