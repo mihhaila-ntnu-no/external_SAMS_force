@@ -24,4 +24,10 @@ SOCKET connect_to_SAMS();
 
 int send_to_SAMS(SOCKET sams_tcp_socket, double time, double central_forces[6]);
 
-int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_time, double displacement_SAMS[6], double rotation_matrix_SAMS[3][3]);
+int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_time, double displacement_SAMS[6], double SIMA_global_to_SAMS_body[3][3]);
+
+int read_from_SAMS(char* SAMS_resultfile_path, int substep_nr_overall, int nr_of_substeps_overall, double* SAMS_txt_time, double displacement_SAMS_t0[6], double velocity_SAMS_t0[6], double F_ice_global[6]);
+
+int get_matrix_from_axis_angle(double e1, double e2, double e3, double theta, double SIMA_global_to_SAMS_body[3][3]);
+
+int get_joint_rotations_from_matrix(double SIMA_global_to_SAMS_body[3][3], double joint_rotation[3]);

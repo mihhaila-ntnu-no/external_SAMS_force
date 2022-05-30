@@ -43,7 +43,7 @@ void CAL_CONV gfexfo_
 	// *ierr will be incremented in case of a warning, so at the end of execution the warnings can be counted
 	// In case of an error, *ierr will be set to a negative value and gfexfo_() will return
 	// The error values decrease sequentially as they appear in the code, but this hasn't shown up in SIMA so far
-	// Lowest used value: -38
+	// Lowest used value: -41
 	*ierr = 0;
 
 	// TODO try simulating with more than 1 substep, is dt referring to the length of one step or substep?
@@ -102,35 +102,18 @@ void CAL_CONV gfexfo_
 	static int nr_of_csv_doubles;
 	static bool called_by_RIFLEX = true; // First assumption
 	static bool called_by_SIMO = false;
-	static int previous_iteration_count; // To check whether we always get a second iteration
 
 	static double F_ice_SIMA_local[6];
-	static double displacement_SAMS_tm1[6]; // [m, rad] Timestep t = -1.
+	static double displacement_SAMS_tm1[6]; // [m, rad] Timestep t = -1
 	static double displacement_SAMS_tm2[6]; // [m, rad] Timestep t = -2
+	static double velocity_SAMS_tm1[6]; // [m/s, rad/s] Timestep t = -1
 	static double mass_matrix_SIMA[6][6]; // [kg, kg*m^2]
 	static double mass_matrix_SAMS[6][6]; // [kg, kg*m^2]
 	static double stiffness_matrix_SIMA[6][6]; // [N/m, N*m]
 	static double stiffness_reference_SIMA[6]; // [m, rad] Hydrostatic equilibrium position
 
-	if (iteration_nr == 0)
-	{
-		// Check if the previous timestep had enough iterations
-		if ((substep_nr_overall > 1) && (previous_iteration_count < 2))
-		{
-			printf("Error: less than 2 iterations performed on timestep %d\n", substep_nr_overall - 1);
-			*ierr = -35;
-			return;
-		}
-		// Zero ice forces, nothing else needed on the first iteration
-		previous_iteration_count = 1;
-		for (int i = 0;i < 9;i++)
-			stor[i] = 0.;
-		*ierr = 0;
-		return;
-	}
-	previous_iteration_count = iteration_nr + 1;
-	// If this timestep is past the second iteration, the ice forces are already in memory
-	if (iteration_nr > 1)
+	// If this timestep is past the first iteration, the ice forces are already in memory
+	if (iteration_nr > 0)
 	{
 		for (int i = 0;i < 3;i++)
 		{
@@ -141,7 +124,7 @@ void CAL_CONV gfexfo_
 		*ierr = 0;
 		return;
 	}
-	// This is the second iteration of a timestep
+	// This is the first iteration of a timestep
 
 	// Working variables
 	int iResult; // For error codes
@@ -157,18 +140,21 @@ void CAL_CONV gfexfo_
 	double SAMS_TCP_time; // [s]
 	double SAMS_txt_time = 0; // [s]
 
+	double coupling_velocity[6]; // In SIMA global coordinates
+	double joint_rotation_velocity[3]; // In SIMA configuration coordinates
+	double joint_rotation_acceleration[3]; // In SIMA configuration coordinates
 	double coupling_acceleration[6]; // [m/s^2, rad/s^2] Acceleration necessary for the SAMS structure to catch up
-	double displacement_SAMS_t0[6]; // [m, rad] Received through TCP
-	double constant_acc_displacement_prediction[3]; // Prediction for SAMS displacement, if it were using constant initial acceleration
-	double impulse_displacement_prediction[3]; // Prediction for SAMS displacement, if it were using impulse scheme
-	double constant_acc_error[3];
-	double impulse_error[3];
-	double velocity_SAMS_tm1[3]; // [m/s] Backwards finite difference
+	double displacement_SAMS_t0[6]; // [m, rad] Received through TCP in SIMA global coordinates
+	double velocity_SAMS_t0[6]; // [m/s, rad/s]
 
 	// Matrix describes rotation from global to local: X_global = M x X_local
-	double rotation_matrix_SIMA[3][3]; // From SIMA global to SIMA local
-	double rotation_matrix_SAMS[3][3]; // From SIMA global to SAMS local
-	double rotation_matrix_SAMS_SIMA[3][3] = { {1,0,0},{0,-1,0},{0,0,-1} }; // From SIMA global to SAMS global
+	// This all applies to the orientation of the structure at the start of the timestep
+	double SIMA_global_to_SIMA_body[3][3];
+	double SIMA_global_to_SAMS_body[3][3];
+	// The 180 degree rotation between SIMA global and SAMS global is represented by a signature matrix
+	// A signature matrix is its own transpose
+	// It is also involutory, its own inverse
+	double SAMS_global_to_SIMA_global[3][3] = { {1,0,0},{0,-1,0},{0,0,-1} };
 	double F_SAMS_hydrostatic[6]; // [N, N*m] Restoring force predicted to act on the SAMS structure
 	double F_coupling_SIMA_global[6]; // [N, N*m] Total force necessary for the SAMS structure to catch up
 	double F_coupling_SAMS_local[6]; // [N, N*m] Same, but in the SAMS structure local coordinate frame
@@ -569,15 +555,15 @@ void CAL_CONV gfexfo_
 		}
 		
 		// Calculate the SIMA global -> SIMA body coordinate rotation matrix
-		rotation_matrix_SIMA[0][0] = cos(psi) * cos(theta);
-		rotation_matrix_SIMA[0][1] = -sin(psi) * cos(phi) + cos(psi) * sin(theta) * sin(phi);
-		rotation_matrix_SIMA[0][2] = sin(psi) * sin(phi) + cos(psi) * sin(theta) * cos(phi);
-		rotation_matrix_SIMA[1][0] = sin(psi) * cos(theta);
-		rotation_matrix_SIMA[1][1] = cos(psi) * cos(phi) + sin(psi) * sin(theta) * sin(phi);
-		rotation_matrix_SIMA[1][2] = -cos(psi) * sin(phi) + sin(psi) * sin(theta) * cos(phi);
-		rotation_matrix_SIMA[2][0] = -sin(theta);
-		rotation_matrix_SIMA[2][1] = cos(theta) * sin(phi);
-		rotation_matrix_SIMA[2][2] = cos(theta) * cos(phi);
+		SIMA_global_to_SIMA_body[0][0] = cos(psi) * cos(theta);
+		SIMA_global_to_SIMA_body[0][1] = -sin(psi) * cos(phi) + cos(psi) * sin(theta) * sin(phi);
+		SIMA_global_to_SIMA_body[0][2] = sin(psi) * sin(phi) + cos(psi) * sin(theta) * cos(phi);
+		SIMA_global_to_SIMA_body[1][0] = sin(psi) * cos(theta);
+		SIMA_global_to_SIMA_body[1][1] = cos(psi) * cos(phi) + sin(psi) * sin(theta) * sin(phi);
+		SIMA_global_to_SIMA_body[1][2] = -cos(psi) * sin(phi) + sin(psi) * sin(theta) * cos(phi);
+		SIMA_global_to_SIMA_body[2][0] = -sin(theta);
+		SIMA_global_to_SIMA_body[2][1] = cos(theta) * sin(phi);
+		SIMA_global_to_SIMA_body[2][2] = cos(theta) * cos(phi);
 	}
 
 	// Receive TCP data from SAMS
@@ -588,7 +574,7 @@ void CAL_CONV gfexfo_
 			*ierr = -16;
 			return;
 		}
-		iResult = receive_from_SAMS(sams_tcp_socket, &SAMS_TCP_time, displacement_SAMS_tm1, rotation_matrix_SAMS);
+		iResult = receive_from_SAMS(sams_tcp_socket, &SAMS_TCP_time, displacement_SAMS_tm1, SIMA_global_to_SAMS_body);
 		if (iResult == 0)
 		{
 			printf("Error: SAMS connection is closed\n");
@@ -612,26 +598,87 @@ void CAL_CONV gfexfo_
 
 	// Calculate force for prescribing SAMS location
 	{
+		// M_GJ: Matrix describing transformation from the SIMA global frame to the joint rotation pseudoframe
+		double SIMA_global_to_joint_rotation[3][3] =
+		{
+			{cos(psi) * cos(theta),-sin(psi),0},
+			{sin(psi) * cos(theta),cos(psi),0},
+			{-sin(theta),0,1 }
+		};
 		// Calculate translational kinematic state in SIMA global coordinates from displacement history
-		double joint_rotation_velocity[3];
-		double joint_rotation_acceleration[3];
 		for (int i = 0;i < 3;i++)
 		{
-			// Calculate translational accelerations as finite differences of displacement.
-			// Using 3 points, the finite difference coefficients are equal for backward, central, and forward
-			// In the simulation beginning, unknown values are assumed 0
-			coupling_acceleration[i] =
+			// Translational coupling velocity
+			coupling_velocity[i] =
 				(
-					displacement_SAMS_tm2[i]
-					- 2 * displacement_SAMS_tm1[i]
+					-displacement_SAMS_tm1[i]
 					+ displacement_SIMA_t0.double_precision[i]
-					) / pow(dt, 2);
+					);
+			// 30.05.2022 No idea what was happening! By the time I reached here with the debug, the problem disappeared
+			// In case it happens again, keep tracking the source of the NaN i guess
+			if (isnan(displacement_SAMS_tm1[3 + i]))
+			{
+				printf("NaN value in displacement_SAMS_tm1[%d]\n", 3 + i);
+				*ierr = -38;
+				return;
+			}
+			if (isnan(displacement_SIMA_t0.double_precision[3 + i]))
+			{
+				printf("NaN value in displacement_SIMA_t0.double_precision[%d]\n", 3 + i);
+				*ierr = -39;
+				return;
+			}
 			// Calculate joint rotation velocities
 			joint_rotation_velocity[i] =
 				(
 					-displacement_SAMS_tm1[3 + i]
 					+ displacement_SIMA_t0.double_precision[3 + i]
 					) / dt;
+			// Assume that the structure never rotates or accelerates more than a half turn during one timestep
+			// This assumption is enforced in joint rotation configuration space, before transforming to 3D physical space
+			if (joint_rotation_velocity[i] < (-M_PI / dt))
+				joint_rotation_velocity[i] += 2 * M_PI / dt;
+			else if (joint_rotation_velocity[i] > (M_PI / dt))
+				joint_rotation_velocity[i] -= 2 * M_PI / dt;
+		}
+		for (int i = 0;i < 3;i++) // All joint rotation velocities must be present before calculating angular velocities
+		{
+			// Convert from joint rotation velocities to angular velocities in the SIMA global frame
+			coupling_velocity[3 + i] = 0.;
+			for (int j = 0;j < 3;j++)
+			{
+				// 30.05.2022 Tracking a weird bug
+				if (isnan(SIMA_global_to_joint_rotation[i][j]))
+				{
+					printf("NaN value in M_GJ[%d][%d]\n", i,j);
+					*ierr = -40;
+					return;
+				}
+				if (isnan(joint_rotation_velocity[j]))
+				{
+					printf("NaN value in joint_rotation_velocity[%d]\n", j);
+					*ierr = -41;
+					return;
+				}
+				coupling_velocity[3 + i] += SIMA_global_to_joint_rotation[i][j] * joint_rotation_velocity[j];
+			}
+			
+			// Calculate accelerations as finite differences of velocity.
+			// This is right in theory, but results in simulation instability and displacement disagreement in practice
+			// Using static variables means that in the simulation beginning, unknown values are assumed 0
+			coupling_acceleration[i] =
+				(
+					-velocity_SAMS_tm1[i]
+					+ coupling_velocity[i]
+					) / dt;
+			// Seems that second order finite difference of displacement was working better for translation
+			// Using 3 points, the finite difference coefficients are equal for backward, central, and forward
+			coupling_acceleration[i] =
+				(
+					displacement_SAMS_tm2[i]
+					- 2 * displacement_SAMS_tm1[i]
+					+ displacement_SIMA_t0.double_precision[i]
+					) / pow(dt, 2);
 			// Calculate joint rotation accelerations
 			joint_rotation_acceleration[i] =
 				(
@@ -639,56 +686,50 @@ void CAL_CONV gfexfo_
 					- 2 * displacement_SAMS_tm1[3 + i]
 					+ displacement_SIMA_t0.double_precision[3 + i]
 					) / pow(dt, 2);
-			// Assume that the structure never rotates or accelerates more than a half turn during one timestep
-			// This assumption is enforced in joint rotation configuration space, before transforming to 3D physical space
-			if (joint_rotation_velocity[i] < (-M_PI / dt))
-				joint_rotation_velocity[i] += 2 * M_PI / dt;
-			if (joint_rotation_velocity[i] > (M_PI / dt))
-				joint_rotation_velocity[i] -= 2 * M_PI / dt;
 			if (joint_rotation_acceleration[i] < (-M_PI / pow(dt, 2)))
 				joint_rotation_acceleration[i] += 2 * M_PI / pow(dt, 2);
-			if (joint_rotation_acceleration[i] > (M_PI / pow(dt, 2)))
+			else if (joint_rotation_acceleration[i] > (M_PI / pow(dt, 2)))
 				joint_rotation_acceleration[i] -= 2 * M_PI / pow(dt, 2);
 		}
 		// Rename joint rotation velocities for clarity
 		double phi_dot = joint_rotation_velocity[0];
 		double theta_dot = joint_rotation_velocity[1];
 		double psi_dot = joint_rotation_velocity[2];
-		// M_GJ: Matrix describing transformation from the SIMA global frame to the joint rotation pseudoframe
-		double M_GJ[3][3] =
-		{
-			{cos(psi) * cos(theta),-sin(psi),0},
-			{sin(psi) * cos(theta),cos(psi),0},
-			{-sin(theta),0,1 }
-		};
-		// Time derivative of M_GJ
-		double M_dot_GJ[3][3] =
+		// Time derivative
+		double SIMA_global_to_joint_rotation_dot[3][3] =
 		{
 			{-sin(psi) * cos(theta) * psi_dot - sin(theta) * cos(psi) * theta_dot,-cos(psi) * psi_dot,0},
 			{-sin(psi) * sin(theta) * theta_dot + cos(psi) * cos(theta) * psi_dot,-sin(psi) * psi_dot,0},
 			{-cos(theta) * theta_dot,0,0}
 		};
-		// Calculate angular acceleration in the SIMA global frame
+		// Transform joint rotation acceleration to angular acceleration in the SIMA global frame
 		for (int i = 0;i < 3;i++)
 		{
 			coupling_acceleration[3 + i] = 0.;
 			for (int j = 0;j < 3;j++)
 			{
-				coupling_acceleration[3 + i] += M_dot_GJ[i][j] * joint_rotation_velocity[j];
-				coupling_acceleration[3 + i] += M_GJ[i][j] * joint_rotation_acceleration[j];
+				coupling_acceleration[3 + i] += SIMA_global_to_joint_rotation_dot[i][j] * joint_rotation_velocity[j];
+				coupling_acceleration[3 + i] += SIMA_global_to_joint_rotation[i][j] * joint_rotation_acceleration[j];
 			}
+		}
+		// Actually, overwrite that with a finite difference of angular velocity, since the previous one is known from .txt
+		for (int i = 0;i < 3;i++)
+		{
+			coupling_acceleration[3 + i] =
+				(
+					-velocity_SAMS_tm1[3 + i]
+					+ coupling_velocity[3 + i]
+					) / dt;
 		}
 		// Calculate coupling force necessary for SAMS to catch up, in global coordinates
 		for (int i = 0;i < 6;i++)
 		{
-			// Here the choice is made, whether to use the true acceleration or just impulse over a timestep
 			F_SAMS_hydrostatic[i] =
 				(stiffness_reference_SIMA[i] - displacement_SAMS_tm1[i])
 				* stiffness_matrix_SIMA[i][i];
 			F_coupling_SIMA_global[i] = coupling_acceleration[i] * mass_matrix_SAMS[i][i] + F_SAMS_hydrostatic[i];
 		}
 	}
-
 
 	// Transform the sea forces from SIMA global coordinate system to SAMS local
 	for (int i = 0;i < 3;i++)
@@ -699,8 +740,8 @@ void CAL_CONV gfexfo_
 		{
 			for (int j = 0;j < 3;j++)
 			{
-				F_coupling_SAMS_local[i] += rotation_matrix_SAMS[j][i] * F_coupling_SIMA_global[j];
-				//F_coupling_SAMS_local[3 + i] += rotation_matrix_SAMS[j][i] * F_coupling_SIMA_global[3 + j]; // TODO uncomment this, shoudl work soon
+				F_coupling_SAMS_local[i] += SIMA_global_to_SAMS_body[j][i] * F_coupling_SIMA_global[j];
+				F_coupling_SAMS_local[3 + i] += SAMS_global_to_SIMA_global[j][i] * F_coupling_SIMA_global[3 + j];
 			}
 		}
 	}
@@ -725,6 +766,7 @@ void CAL_CONV gfexfo_
 			nr_of_substeps_overall,
 			&SAMS_txt_time,
 			displacement_SAMS_t0,
+			velocity_SAMS_t0,
 			F_ice_SIMA_global
 		);
 		if (iResult < 0)
@@ -740,49 +782,6 @@ void CAL_CONV gfexfo_
 		}
 	}
 
-	// Check if SAMS moved to the prescribed position
-	// TODO only check if the ice forces were zero
-	{
-		// Make a prediction about kinematic state of the SAMS structure at t=0
-		double acceleration_SAMS_t0[3];
-		double constant_acc_velocity_prediction[3];
-		double impulse_velocity_prediction[3];
-		double impulse_SAMS_t0[3];
-		for (int i = 0;i < 3;i++)
-		{
-			velocity_SAMS_tm1[i] = (-displacement_SAMS_tm2[i] + displacement_SAMS_tm1[i]) / dt;
-			// Where would SAMS end up if it were using constant initial acceleration?
-			acceleration_SAMS_t0[i] = F_coupling_SIMA_global[i] / mass_matrix_SAMS[i][i];
-			constant_acc_velocity_prediction[i] = velocity_SAMS_tm1[i] + acceleration_SAMS_t0[i] * dt;
-			constant_acc_displacement_prediction[i] = displacement_SAMS_tm1[i] + (velocity_SAMS_tm1[i] + constant_acc_velocity_prediction[i]) / 2 * dt;
-			// Where would SAMS end up if it were using impulse?
-			impulse_SAMS_t0[i] = F_coupling_SIMA_global[i] * dt;
-			impulse_velocity_prediction[i] = velocity_SAMS_tm1[i] + impulse_SAMS_t0[i] / mass_matrix_SAMS[i][i];
-			impulse_displacement_prediction[i] = displacement_SAMS_tm1[i] + impulse_velocity_prediction[i] * dt;
-		}
-		
-		for (int i = 0;i < 3;i++)
-		{
-			break; // TODO temporarily don't care about this error
-			// In case the current displacement is zero, avoid zero-division and just save the absolute error.
-			// This will result in 10 cm being treated equally to an error of 1%
-			constant_acc_error[i] = (constant_acc_displacement_prediction[i]- displacement_SAMS_t0[i]) / ((displacement_SAMS_t0[i] == 0) ? 1 : displacement_SAMS_t0[i])  ;
-			impulse_error[i] = (impulse_displacement_prediction[i]- displacement_SAMS_t0[i]) / ((displacement_SAMS_t0[i] == 0) ? 1 : displacement_SAMS_t0[i]);
-			if (constant_acc_error[i] > 0.1)
-			{
-				printf("Error: Constant-initial-acceleration prediction of SAMS displacement in direction %d was off by %f\n",i,constant_acc_error[i]);
-				*ierr = -37;
-				return;
-			}
-			if (constant_acc_error[i] > 0.1)
-			{
-				printf("Error: Impulse-based prediction of SAMS displacement in direction %d was off by %f\n",i, impulse_error[i]);
-				*ierr = -38;
-				return;
-			}
-		}
-	}
-
 	// Save the ice forces to SIMA's memory for the next timestep
 	for (int i = 0;i < 3;i++)
 	{
@@ -794,8 +793,8 @@ void CAL_CONV gfexfo_
 			for (int j = 0;j < 3;j++)
 			{
 				// TODO check ICOORD, switch between transforming and not transforming. the setting is in the DLL force part of the GUI
-				F_ice_SIMA_local[i] += rotation_matrix_SIMA[j][i] * F_ice_SIMA_global[j] / 1000; // N -> kN
-				F_ice_SIMA_local[3 + i] += rotation_matrix_SIMA[j][i] * F_ice_SIMA_global[3 + j] / 1000000; // N*m -> MN*m
+				F_ice_SIMA_local[i] += SIMA_global_to_SIMA_body[j][i] * F_ice_SIMA_global[j] / 1000; // N -> kN
+				F_ice_SIMA_local[3 + i] += SIMA_global_to_SIMA_body[j][i] * F_ice_SIMA_global[3 + j] / 1000000; // N*m -> MN*m
 			}
 		}
 		// Save ice forces to SIMA memory
@@ -821,8 +820,7 @@ void CAL_CONV gfexfo_
 			"NEXTRA",
 			"IGRAV",
 			"ISTORE",
-			"ITER",
-			"previous_iteration_count"
+			"ITER"
 		};
 		char* csv_floats_header[] =
 		{
@@ -851,60 +849,66 @@ void CAL_CONV gfexfo_
 			"FI",
 			"THETA",
 			"PSI",
+			"joint_rotation_velocity_0",
+			"joint_rotation_velocity_1",
+			"joint_rotation_velocity_2",
+			"joint_rotation_acceleration_0",
+			"joint_rotation_acceleration_1",
+			"joint_rotation_acceleration_2",
+			"coupling_velocity_0",
+			"coupling_velocity_1",
+			"coupling_velocity_2",
+			"coupling_velocity_3",
+			"coupling_velocity_4",
+			"coupling_velocity_5",
 			"coupling_acceleration_0",
 			"coupling_acceleration_1",
 			"coupling_acceleration_2",
 			"coupling_acceleration_3",
 			"coupling_acceleration_4",
 			"coupling_acceleration_5",
-			"F_coupling_hydrostatic_0",
-			"F_coupling_hydrostatic_1",
-			"F_coupling_hydrostatic_2",
-			"F_coupling_hydrostatic_3",
-			"F_coupling_hydrostatic_4",
-			"F_coupling_hydrostatic_5",
+			"F_SAMS_hydrostatic_0",
+			"F_SAMS_hydrostatic_1",
+			"F_SAMS_hydrostatic_2",
+			"F_SAMS_hydrostatic_3",
+			"F_SAMS_hydrostatic_4",
+			"F_SAMS_hydrostatic_5",
+			"F_coupling_SAMS_local_0",
+			"F_coupling_SAMS_local_1",
+			"F_coupling_SAMS_local_2",
+			"F_coupling_SAMS_local_3",
+			"F_coupling_SAMS_local_4",
+			"F_coupling_SAMS_local_5",
 			"displacement_SAMS_t0_0",
 			"displacement_SAMS_t0_1",
 			"displacement_SAMS_t0_2",
 			"displacement_SAMS_t0_3",
 			"displacement_SAMS_t0_4",
 			"displacement_SAMS_t0_5",
-			"displacement_SAMS_tm1_0",
-			"displacement_SAMS_tm1_1",
-			"displacement_SAMS_tm1_2",
-			"velocity_SAMS_tm1_0",
-			"velocity_SAMS_tm1_1",
-			"velocity_SAMS_tm1_2",
-			"constant_acc_displacement_prediction_0",
-			"constant_acc_displacement_prediction_1",
-			"constant_acc_displacement_prediction_2",
-			"impulse_displacement_prediction_0",
-			"impulse_displacement_prediction_1",
-			"impulse_displacement_prediction_2",
-			"constant_acc_error_0",
-			"constant_acc_error_1",
-			"constant_acc_error_2",
-			"impulse_error_0",
-			"impulse_error_1",
-			"impulse_error_2",
-			"rotation_matrix_SIMA_0_0",
-			"rotation_matrix_SIMA_0_1",
-			"rotation_matrix_SIMA_0_2",
-			"rotation_matrix_SIMA_1_0",
-			"rotation_matrix_SIMA_1_1",
-			"rotation_matrix_SIMA_1_2",
-			"rotation_matrix_SIMA_2_0",
-			"rotation_matrix_SIMA_2_1",
-			"rotation_matrix_SIMA_2_2",
-			"rotation_matrix_SAMS_0_0",
-			"rotation_matrix_SAMS_0_1",
-			"rotation_matrix_SAMS_0_2",
-			"rotation_matrix_SAMS_1_0",
-			"rotation_matrix_SAMS_1_1",
-			"rotation_matrix_SAMS_1_2",
-			"rotation_matrix_SAMS_2_0",
-			"rotation_matrix_SAMS_2_1",
-			"rotation_matrix_SAMS_2_2",
+			"velocity_SAMS_t0_0",
+			"velocity_SAMS_t0_1",
+			"velocity_SAMS_t0_2",
+			"velocity_SAMS_t0_3",
+			"velocity_SAMS_t0_4",
+			"velocity_SAMS_t0_5",
+			"SIMA_global_to_SIMA_body_0",
+			"SIMA_global_to_SIMA_body_1",
+			"SIMA_global_to_SIMA_body_2",
+			"SIMA_global_to_SIMA_body_3",
+			"SIMA_global_to_SIMA_body_4",
+			"SIMA_global_to_SIMA_body_5",
+			"SIMA_global_to_SIMA_body_6",
+			"SIMA_global_to_SIMA_body_7",
+			"SIMA_global_to_SIMA_body_8",
+			"SIMA_global_to_SAMS_body_0",
+			"SIMA_global_to_SAMS_body_1",
+			"SIMA_global_to_SAMS_body_2",
+			"SIMA_global_to_SAMS_body_3",
+			"SIMA_global_to_SAMS_body_4",
+			"SIMA_global_to_SAMS_body_5",
+			"SIMA_global_to_SAMS_body_6",
+			"SIMA_global_to_SAMS_body_7",
+			"SIMA_global_to_SAMS_body_8",
 			"F_ice_global_0",
 			"F_ice_global_1",
 			"F_ice_global_2",
@@ -967,8 +971,7 @@ void CAL_CONV gfexfo_
 			iinfo[8],
 			iinfo[9],
 			iinfo[10],
-			iinfo[11],
-			previous_iteration_count
+			iinfo[11]
 		};
 		float csv_floats[] =
 		{
@@ -996,6 +999,18 @@ void CAL_CONV gfexfo_
 			displacement_SIMA_t0.double_precision[3],
 			displacement_SIMA_t0.double_precision[4],
 			displacement_SIMA_t0.double_precision[5],
+			joint_rotation_velocity[0],
+			joint_rotation_velocity[1],
+			joint_rotation_velocity[2],
+			joint_rotation_acceleration[0],
+			joint_rotation_acceleration[1],
+			joint_rotation_acceleration[2],
+			coupling_velocity[0],
+			coupling_velocity[1],
+			coupling_velocity[2],
+			coupling_velocity[3],
+			coupling_velocity[4],
+			coupling_velocity[5],
 			coupling_acceleration[0],
 			coupling_acceleration[1],
 			coupling_acceleration[2],
@@ -1008,48 +1023,42 @@ void CAL_CONV gfexfo_
 			F_SAMS_hydrostatic[3],
 			F_SAMS_hydrostatic[4],
 			F_SAMS_hydrostatic[5],
+			F_coupling_SAMS_local[0],
+			F_coupling_SAMS_local[1],
+			F_coupling_SAMS_local[2],
+			F_coupling_SAMS_local[3],
+			F_coupling_SAMS_local[4],
+			F_coupling_SAMS_local[5],
 			displacement_SAMS_t0[0],
 			displacement_SAMS_t0[1],
 			displacement_SAMS_t0[2],
 			displacement_SAMS_t0[3],
 			displacement_SAMS_t0[4],
 			displacement_SAMS_t0[5],
-			displacement_SAMS_tm1[0],
-			displacement_SAMS_tm1[1],
-			displacement_SAMS_tm1[2],
-			velocity_SAMS_tm1[0],
-			velocity_SAMS_tm1[1],
-			velocity_SAMS_tm1[2],
-			constant_acc_displacement_prediction[0],
-			constant_acc_displacement_prediction[1],
-			constant_acc_displacement_prediction[2],
-			impulse_displacement_prediction[0],
-			impulse_displacement_prediction[1],
-			impulse_displacement_prediction[2],
-			constant_acc_error[0],
-			constant_acc_error[1],
-			constant_acc_error[2],
-			impulse_error[0],
-			impulse_error[1],
-			impulse_error[2],
-			rotation_matrix_SIMA[0][0],
-			rotation_matrix_SIMA[0][1],
-			rotation_matrix_SIMA[0][2],
-			rotation_matrix_SIMA[1][0],
-			rotation_matrix_SIMA[1][1],
-			rotation_matrix_SIMA[1][2],
-			rotation_matrix_SIMA[2][0],
-			rotation_matrix_SIMA[2][1],
-			rotation_matrix_SIMA[2][2],
-			rotation_matrix_SAMS[0][0],
-			rotation_matrix_SAMS[0][1],
-			rotation_matrix_SAMS[0][2],
-			rotation_matrix_SAMS[1][0],
-			rotation_matrix_SAMS[1][1],
-			rotation_matrix_SAMS[1][2],
-			rotation_matrix_SAMS[2][0],
-			rotation_matrix_SAMS[2][1],
-			rotation_matrix_SAMS[2][2],
+			velocity_SAMS_t0[0],
+			velocity_SAMS_t0[1],
+			velocity_SAMS_t0[2],
+			velocity_SAMS_t0[3],
+			velocity_SAMS_t0[4],
+			velocity_SAMS_t0[5],
+			SIMA_global_to_SIMA_body[0][0],
+			SIMA_global_to_SIMA_body[0][1],
+			SIMA_global_to_SIMA_body[0][2],
+			SIMA_global_to_SIMA_body[1][0],
+			SIMA_global_to_SIMA_body[1][1],
+			SIMA_global_to_SIMA_body[1][2],
+			SIMA_global_to_SIMA_body[2][0],
+			SIMA_global_to_SIMA_body[2][1],
+			SIMA_global_to_SIMA_body[2][2],
+			SIMA_global_to_SAMS_body[0][0],
+			SIMA_global_to_SAMS_body[0][1],
+			SIMA_global_to_SAMS_body[0][2],
+			SIMA_global_to_SAMS_body[1][0],
+			SIMA_global_to_SAMS_body[1][1],
+			SIMA_global_to_SAMS_body[1][2],
+			SIMA_global_to_SAMS_body[2][0],
+			SIMA_global_to_SAMS_body[2][1],
+			SIMA_global_to_SAMS_body[2][2],
 			F_ice_SIMA_global[0],
 			F_ice_SIMA_global[1],
 			F_ice_SIMA_global[2],
@@ -1086,7 +1095,8 @@ void CAL_CONV gfexfo_
 		}
 		for (int i = 0; i < nr_of_csv_floats; i++)
 		{
-			sprintf(field_buffer, "%f", csv_floats[i]);
+			// 9 is FLT_DECIMAL_DIG from float.h
+			sprintf(field_buffer, "%.9g", csv_floats[i]);
 			if (iResult < 0)
 			{
 				printf("Failure converting float to .csv field string\n");
@@ -1104,7 +1114,8 @@ void CAL_CONV gfexfo_
 		}
 		for (int i = 0; i < nr_of_csv_doubles; i++)
 		{
-			sprintf(field_buffer, "%f", csv_doubles[i]);
+			// 17 is DBL_DECIMAL_DIG from float.h
+			sprintf(field_buffer, "%.17g", csv_doubles[i]);
 			if (iResult < 0)
 			{
 				printf("Failure converting double to .csv field string\n");
@@ -1141,6 +1152,7 @@ void CAL_CONV gfexfo_
 	for (int i = 0; i < 6; i++)
 	{
 		displacement_SAMS_tm2[i] = displacement_SAMS_tm1[i];
+		velocity_SAMS_tm1[i] = velocity_SAMS_t0[i];
 	}
 
 	free(line_buffer); // Not clear why I have to free this and not everything else
@@ -1220,7 +1232,7 @@ int send_to_SAMS(SOCKET sams_tcp_socket, double time, double central_forces[6])
 	return send(sams_tcp_socket, GFEXFO_to_SAMS.character_array, sizeof(GFEXFO_to_SAMS.double_precision), 0);
 }
 
-int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_TCP_time, double displacement_SAMS_tm1[6], double rotation_matrix_SAMS[3][3])
+int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_TCP_time, double displacement_SAMS_tm1[6], double SIMA_global_to_SAMS_body[3][3])
 {
 	// The SAMS exchange happens at the beginning of each timestep.
 	// From SAMS, the kinematic state is sent corresponding to the beginning of the timestep
@@ -1243,56 +1255,27 @@ int receive_from_SAMS(SOCKET sams_tcp_socket, double* SAMS_TCP_time, double disp
 	double e2 = SAMS_to_GFEXFO.double_precision[5];
 	double e3 = SAMS_to_GFEXFO.double_precision[6];
 	double theta_euler = SAMS_to_GFEXFO.double_precision[7];
-	// Check for NaN values
-	if (isnan(e1) || isnan(e2) || isnan(e3) || isnan(theta_euler))
-	{
-		printf("Error at timestep %.1f: axis-angle orientation from SAMS contains bad values\n",*SAMS_TCP_time);
-		printf("Euler axis: %f %f %f\n", e1, e2, e3);
-		printf("Euler angle: %f\n", theta_euler);
-		return -1;
-	}
-	double rotation_matrix_SAMS_internal[3][3];
-	// Calculate the SAMS global -> SAMS local rotation matrix
-	rotation_matrix_SAMS_internal[0][0] = (1 - cos(theta_euler)) * e1 * e1 + cos(theta_euler);
-	rotation_matrix_SAMS_internal[0][1] = (1 - cos(theta_euler)) * e1 * e2 - e3 * sin(theta_euler);
-	rotation_matrix_SAMS_internal[0][2] = (1 - cos(theta_euler)) * e1 * e3 + e2 * sin(theta_euler);
-	rotation_matrix_SAMS_internal[1][0] = (1 - cos(theta_euler)) * e2 * e1 + e3 * sin(theta_euler);
-	rotation_matrix_SAMS_internal[1][1] = (1 - cos(theta_euler)) * e2 * e2 + cos(theta_euler);
-	rotation_matrix_SAMS_internal[1][2] = (1 - cos(theta_euler)) * e2 * e3 - e1 * sin(theta_euler);
-	rotation_matrix_SAMS_internal[2][0] = (1 - cos(theta_euler)) * e3 * e1 - e2 * sin(theta_euler);
-	rotation_matrix_SAMS_internal[2][1] = (1 - cos(theta_euler)) * e3 * e2 + e1 * sin(theta_euler);
-	rotation_matrix_SAMS_internal[2][2] = (1 - cos(theta_euler)) * e3 * e3 + cos(theta_euler);
+	double SAMS_global_to_SAMS_body[3][3];
+	int mResult = get_matrix_from_axis_angle(e1, e2, e3, theta_euler, SIMA_global_to_SAMS_body);
+	if (mResult < 0)
+		return mResult;
 	// SAMS has the global Z axis pointing to the ground, SIMA to the sky
-	double rotation_matrix_SAMS_SIMA[3][3] = { {1,0,0},{0,-1,0},{0,0,-1} };
-	// Pre-multiply the SAMS global->local matrix with a 180 degree rotation around global X
-	for (int i = 0;i < 3;i++)
-		for (int j = 0;j < 3;j++)
-		{
-			rotation_matrix_SAMS[i][j] = 0;
-			for (int k = 0;k < 3;k++)
-				rotation_matrix_SAMS[i][j] += rotation_matrix_SAMS_SIMA[i][k] * rotation_matrix_SAMS_internal[k][j];
-		}
+	double SIMA_global_to_SAMS_global[3][3] = { {1,0,0},{0,-1,0},{0,0,-1} };
 	// Return the SAMS global displacement vector in the SIMA global coordinate frame
 	for (int i = 0;i < 3;i++)
 	{
 		displacement_SAMS_tm1[i] = 0;
 		for (int j = 0;j < 3;j++)
-			displacement_SAMS_tm1[i] += rotation_matrix_SAMS_SIMA[i][j] * SAMS_to_GFEXFO.double_precision[1 + j];
+			displacement_SAMS_tm1[i] += SIMA_global_to_SAMS_global[i][j] * SAMS_to_GFEXFO.double_precision[1 + j];
 	}
-	// Convert the Euler axis-angle representation to Tait-Bryan chained Z-Y-X rotations, aka joint rotations
-	// TODO if we are anyway returning the rotation matrix, why bother with the joint rotations
-	double theta_zyx = asin(-rotation_matrix_SAMS[2][0]);
-	double phi_zyx = asin(rotation_matrix_SAMS[2][1] / cos(theta_zyx));
-	double psi_zyx = asin(rotation_matrix_SAMS[1][0] / cos(theta_zyx));
-	// The calculations were analytically derived from the rotation matrix definition in SIMO manual, app.C
-	displacement_SAMS_tm1[3] = phi_zyx;
-	displacement_SAMS_tm1[4] = theta_zyx;
-	displacement_SAMS_tm1[5] = psi_zyx;
-	
+	double joint_rotation[3]={0.,0.,0.};
+	get_joint_rotations_from_matrix(SIMA_global_to_SAMS_body, joint_rotation);
+	for (int i=0;i<3;i++)
+		displacement_SAMS_tm1[3+i] = joint_rotation[i];
 	return iResult;
 }
 
-int read_from_SAMS(char* SAMS_resultfile_path, int substep_nr_overall, int nr_of_substeps_overall, double* SAMS_txt_time, double displacement_SAMS_t0[6], double F_ice_global[6])
+int read_from_SAMS(char* SAMS_resultfile_path, int substep_nr_overall, int nr_of_substeps_overall, double* SAMS_txt_time, double displacement_SAMS_t0[6], double velocity_SAMS_t0[6], double F_ice_global[6])
 {
 	int ierr = 0;
 	char* line_buffer = NULL; // for getline()
@@ -1376,29 +1359,89 @@ int read_from_SAMS(char* SAMS_resultfile_path, int substep_nr_overall, int nr_of
 	}
 	// Collect time and ice forces
 	*SAMS_txt_time = SAMS_txt_output[0];
+	// Rename the Euler axis components and the Euler angle for clarity
+	double e1 = SAMS_txt_output[4];
+	double e2 = SAMS_txt_output[5];
+	double e3 = SAMS_txt_output[6];
+	double theta_euler = SAMS_txt_output[7];
+	double SIMA_global_to_SAMS_body[3][3]; // Describes rotation from SIMA global to SAMS body local at end of timestep
+	int mResult = get_matrix_from_axis_angle(e1, e2, e3, theta_euler, SIMA_global_to_SAMS_body);
+	if (mResult < 0)
+		return mResult;
+	double joint_rotation[3]={0.,0.,0.};
+	get_joint_rotations_from_matrix(SIMA_global_to_SAMS_body, joint_rotation);
 	// Matrix describing rotation from SIMA global to SAMS global
-	double rotation_matrix_SAMS_SIMA[3][3] = { {1,0,0},{0,-1,0},{0,0,-1} };
-	// Return ice forces in the SIMA global coordinate frame
+	double SIMA_global_to_SAMS_global[3][3] = { {1,0,0},{0,-1,0},{0,0,-1} };
+	// Return displacements, velocities, ice forces in the SIMA global coordinate frame
 	for (int i = 0;i < 3;i++)
 	{
+		displacement_SAMS_t0[i] = 0.;
+		displacement_SAMS_t0[3 + i] = joint_rotation[i];
+		velocity_SAMS_t0[i] = 0.;
+		velocity_SAMS_t0[3 + i] = 0.;
 		F_ice_global[i] = 0;
 		F_ice_global[3 + i] = 0;
-		displacement_SAMS_t0[i] = 0.;
-		// TODO also return orientation? In what format though, matrix? join rotations? and what for
-		// Right now, the second half of this array will be left uninitialized by this function
-		// TODO could also get the velocities, to avoid calculating them by hand next timestep
 		for (int j = 0;j < 3;j++)
 		{
-			displacement_SAMS_t0[i] += rotation_matrix_SAMS_SIMA[i][j] * SAMS_txt_output[1 + i];
+			displacement_SAMS_t0[i] += SIMA_global_to_SAMS_global[i][j] * SAMS_txt_output[1 + i];
+			velocity_SAMS_t0[i] += SIMA_global_to_SAMS_global[i][j] * SAMS_txt_output[8 + j];
+			velocity_SAMS_t0[3 + i] += SIMA_global_to_SAMS_global[i][j] * SAMS_txt_output[11 + j];
 			// Linear forces are composed of breaking and rubble forces
-			F_ice_global[i] += rotation_matrix_SAMS_SIMA[i][j] * (SAMS_txt_output[20 + i] + SAMS_txt_output[23 + i]);
+			F_ice_global[i] += SIMA_global_to_SAMS_global[i][j] * (SAMS_txt_output[20 + i] + SAMS_txt_output[23 + i]);
 			// Rotational forces are given as total torque in SAMS global frame
-			F_ice_global[3 + i] += rotation_matrix_SAMS_SIMA[i][j] * SAMS_txt_output[26 + i];
+			F_ice_global[3 + i] += SIMA_global_to_SAMS_global[i][j] * SAMS_txt_output[26 + i];
 		}
-	}
-	return ierr; // 0 if success, negative error code in case of failure, positive count in case of warnings
+	}		
 	if (substep_nr_overall == nr_of_substeps_overall)
-	{
 		fclose(SAMS_result_file); // TODO clean up this file also in case of ungraceful exit
+	return ierr; // 0 if success, negative error code in case of failure, positive count in case of warnings
+}
+
+int get_matrix_from_axis_angle(double e1, double e2, double e3, double theta, double SIMA_global_to_SAMS_body[3][3])
+{
+	int ierr = 0;
+	// Check for NaN values
+	if (isnan(e1) || isnan(e2) || isnan(e3) || isnan(theta))
+	{
+		printf("Error: axis-angle orientation from SAMS contains bad values\n");
+		printf("Euler axis: %f %f %f\n", e1, e2, e3);
+		printf("Euler angle: %f\n", theta);
+		return -37;
 	}
+	double SAMS_global_to_SAMS_body[3][3];
+	// Calculate the SAMS global -> SAMS local rotation matrix
+	SAMS_global_to_SAMS_body[0][0] = (1 - cos(theta)) * e1 * e1 + cos(theta);
+	SAMS_global_to_SAMS_body[0][1] = (1 - cos(theta)) * e1 * e2 - e3 * sin(theta);
+	SAMS_global_to_SAMS_body[0][2] = (1 - cos(theta)) * e1 * e3 + e2 * sin(theta);
+	SAMS_global_to_SAMS_body[1][0] = (1 - cos(theta)) * e2 * e1 + e3 * sin(theta);
+	SAMS_global_to_SAMS_body[1][1] = (1 - cos(theta)) * e2 * e2 + cos(theta);
+	SAMS_global_to_SAMS_body[1][2] = (1 - cos(theta)) * e2 * e3 - e1 * sin(theta);
+	SAMS_global_to_SAMS_body[2][0] = (1 - cos(theta)) * e3 * e1 - e2 * sin(theta);
+	SAMS_global_to_SAMS_body[2][1] = (1 - cos(theta)) * e3 * e2 + e1 * sin(theta);
+	SAMS_global_to_SAMS_body[2][2] = (1 - cos(theta)) * e3 * e3 + cos(theta);
+	// SAMS has the global Z axis pointing to the ground, SIMA to the sky
+	double SAMS_global_to_SIMA_global[3][3] = { {1,0,0},{0,-1,0},{0,0,-1} };
+	// Pre-multiply the SAMS global->local matrix with a 180 degree rotation around global X
+	for (int i = 0;i < 3;i++)
+		for (int j = 0;j < 3;j++)
+		{
+			SIMA_global_to_SAMS_body[i][j] = 0;
+			for (int k = 0;k < 3;k++)
+				SIMA_global_to_SAMS_body[i][j] += SAMS_global_to_SIMA_global[i][k] * SAMS_global_to_SAMS_body[k][j];
+		}
+	return ierr;
+}
+
+int get_joint_rotations_from_matrix(double SIMA_global_to_SAMS_body[3][3], double joint_rotation[3])
+{
+	int ierr = 0;
+	// Convert the Euler axis-angle representation to Tait-Bryan chained Z-Y-X rotations, aka joint rotations
+	double theta = asin(-SIMA_global_to_SAMS_body[2][0]);
+	double phi = asin(SIMA_global_to_SAMS_body[2][1] / cos(theta));
+	double psi = asin(SIMA_global_to_SAMS_body[1][0] / cos(theta));
+	// The calculations were analytically derived from the rotation matrix definition in SIMO manual, app.C
+	joint_rotation[0] = -phi; // TODO magic minus sign
+	joint_rotation[1] = theta;
+	joint_rotation[2] = psi;
+	return ierr;
 }
