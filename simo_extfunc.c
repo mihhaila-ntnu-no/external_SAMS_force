@@ -46,7 +46,7 @@ void CAL_CONV gfexfo_
 	// Lowest used value: -41
 	*ierr = 0;
 
-	// TODO try simulating with more than 1 substep, is dt referring to the length of one step or substep?
+	
 	// Function argument aliases
 	int body_nr = iinfo[2]-1; // bodies are indexed starting with 1
 	int step_nr = iinfo[5];
@@ -57,6 +57,7 @@ void CAL_CONV gfexfo_
 	int substep_nr_overall = substep_nr + (step_nr - 1) * nr_of_substeps;
 	int nr_of_substeps_overall = nr_of_steps * nr_of_substeps;
 	float time = rinfo[0];
+	// TODO try simulating with more than 1 substep, is dt referring to the length of one step or substep?
 	float dt = rinfo[1];
 	
 	// TODO check that on this machine, float and double have a 2x size difference
@@ -319,6 +320,7 @@ void CAL_CONV gfexfo_
 			return;
 		}
 		// TODO check that the simulation time >= 19 s. Shorter simulations seem to cause SAMS to expect an extra TCP message at the end
+		// Same thing happened with t=1800 s, it seems
 		if (SAMS_maxSimulationTime != nr_of_steps * dt)
 		{
 			printf("Error: Different simulation times declared in SAMS and SIMA.\n");
@@ -388,6 +390,7 @@ void CAL_CONV gfexfo_
 		for (int i = 0;i < 3;i++)
 			mass_matrix_SAMS[3 + i][3 + i] = pow(radius_of_gyration_SAMS[i], 2) * mass_matrix_SAMS[i][i];
 		// Check the mass matrix for disrepancies between SAMS and SIMA
+		// TODO Is this really necessary? The SAMS mass is fake anyway to ensure agreement in initial displacement
 		double mass_matrix_relative_difference[6][6]; // [kg, kg*m^2]
 		for (int i = 0;i < 6;i++)
 		{
@@ -534,7 +537,7 @@ void CAL_CONV gfexfo_
 			printf("disabled\n");
 	};
 
-	// Rename the sequential angular displacements for clarity
+	// Rename the joint rotations for clarity
 	double phi = displacement_SIMA_t0.double_precision[3];
 	double theta = displacement_SIMA_t0.double_precision[4];
 	double psi = displacement_SIMA_t0.double_precision[5];
@@ -553,7 +556,6 @@ void CAL_CONV gfexfo_
 			timestep_start_time = rinfo[0] - dt;
 			timestep_end_time = rinfo[0];
 		}
-		
 		// Calculate the SIMA global -> SIMA body coordinate rotation matrix
 		SIMA_global_to_SIMA_body[0][0] = cos(psi) * cos(theta);
 		SIMA_global_to_SIMA_body[0][1] = -sin(psi) * cos(phi) + cos(psi) * sin(theta) * sin(phi);
@@ -593,7 +595,6 @@ void CAL_CONV gfexfo_
 			*ierr = -34;
 			return;
 		}
-		// TODO express the difference between SAMS and SIMA rotation matrices, define a maximum value (1%?)
 	}
 
 	// Calculate force for prescribing SAMS location
@@ -614,20 +615,6 @@ void CAL_CONV gfexfo_
 					-displacement_SAMS_tm1[i]
 					+ displacement_SIMA_t0.double_precision[i]
 					);
-			// 30.05.2022 No idea what was happening! By the time I reached here with the debug, the problem disappeared
-			// In case it happens again, keep tracking the source of the NaN i guess
-			if (isnan(displacement_SAMS_tm1[3 + i]))
-			{
-				printf("NaN value in displacement_SAMS_tm1[%d]\n", 3 + i);
-				*ierr = -38;
-				return;
-			}
-			if (isnan(displacement_SIMA_t0.double_precision[3 + i]))
-			{
-				printf("NaN value in displacement_SIMA_t0.double_precision[%d]\n", 3 + i);
-				*ierr = -39;
-				return;
-			}
 			// Calculate joint rotation velocities
 			joint_rotation_velocity[i] =
 				(
@@ -647,31 +634,10 @@ void CAL_CONV gfexfo_
 			coupling_velocity[3 + i] = 0.;
 			for (int j = 0;j < 3;j++)
 			{
-				// 30.05.2022 Tracking a weird bug
-				if (isnan(SIMA_global_to_joint_rotation[i][j]))
-				{
-					printf("NaN value in M_GJ[%d][%d]\n", i,j);
-					*ierr = -40;
-					return;
-				}
-				if (isnan(joint_rotation_velocity[j]))
-				{
-					printf("NaN value in joint_rotation_velocity[%d]\n", j);
-					*ierr = -41;
-					return;
-				}
 				coupling_velocity[3 + i] += SIMA_global_to_joint_rotation[i][j] * joint_rotation_velocity[j];
 			}
-			
-			// Calculate accelerations as finite differences of velocity.
-			// This is right in theory, but results in simulation instability and displacement disagreement in practice
-			// Using static variables means that in the simulation beginning, unknown values are assumed 0
-			coupling_acceleration[i] =
-				(
-					-velocity_SAMS_tm1[i]
-					+ coupling_velocity[i]
-					) / dt;
-			// Seems that second order finite difference of displacement was working better for translation
+			// Calculate translational acceleration as a second order finite difference of displacement
+			// Calculating it as first order finite difference of velocity result in reduced accuracy
 			// Using 3 points, the finite difference coefficients are equal for backward, central, and forward
 			coupling_acceleration[i] =
 				(
@@ -702,17 +668,7 @@ void CAL_CONV gfexfo_
 			{-sin(psi) * sin(theta) * theta_dot + cos(psi) * cos(theta) * psi_dot,-sin(psi) * psi_dot,0},
 			{-cos(theta) * theta_dot,0,0}
 		};
-		// Transform joint rotation acceleration to angular acceleration in the SIMA global frame
-		for (int i = 0;i < 3;i++)
-		{
-			coupling_acceleration[3 + i] = 0.;
-			for (int j = 0;j < 3;j++)
-			{
-				coupling_acceleration[3 + i] += SIMA_global_to_joint_rotation_dot[i][j] * joint_rotation_velocity[j];
-				coupling_acceleration[3 + i] += SIMA_global_to_joint_rotation[i][j] * joint_rotation_acceleration[j];
-			}
-		}
-		// Actually, overwrite that with a finite difference of angular velocity, since the previous one is known from .txt
+		// Calculate angular acceleration as finite difference of angular velocity, since the previous one is known from .txt
 		for (int i = 0;i < 3;i++)
 		{
 			coupling_acceleration[3 + i] =
@@ -731,7 +687,7 @@ void CAL_CONV gfexfo_
 		}
 	}
 
-	// Transform the sea forces from SIMA global coordinate system to SAMS local
+	// Transform the coupling forces from SIMA global coordinate system to SAMS local
 	for (int i = 0;i < 3;i++)
 	{
 		F_coupling_SAMS_local[i] = 0;
@@ -758,7 +714,6 @@ void CAL_CONV gfexfo_
 
 	// Read displacement and ice forces from the SAMS result .txt file
 	{
-		// For SIMO simulations, the i=0, t=0.0 line will not be written. Skip reading it
 		iResult = read_from_SAMS
 		(
 			SAMS_resultfile_path,
