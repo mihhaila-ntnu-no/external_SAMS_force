@@ -1091,6 +1091,8 @@ void CAL_CONV gfexfo_
 	// Last timestep, SAMS won't send anything. Close the connection and logs
 	if (substep_nr_overall == nr_of_substeps_overall)
 	{
+		// TODO send and maybe receive one last request in case SAMS wants it
+		// happens with some lengths (<19s, 1800s, 3600s) but not others
 		iResult = WSACleanup();
 		if (iResult == SOCKET_ERROR)
 		{
